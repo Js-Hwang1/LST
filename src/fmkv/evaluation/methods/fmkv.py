@@ -133,22 +133,33 @@ class FMKVMethod(BaseMethod):
     
     def _setup_compression_policy(self) -> None:
         """Set up the compression policy."""
-        from fmkv.compression.policy import CompressionPolicy
+        from fmkv.compression.policy import WindowPolicy, BudgetPolicy
         
         # Determine window size from compression ratio or budget
         if self.config.compression_ratio is not None:
             # e.g., ratio=0.5 means keep 50% of tokens
             window_size = max(8, int(64 / self.config.compression_ratio))
+            # Estimate max_length based on compression ratio
+            # If we compress at ratio 0.5, we want cache to stay around 2x the compressed size
+            max_length = int(128 / self.config.compression_ratio) if self.config.compression_ratio > 0 else 128
+            self.compression_policy = WindowPolicy(
+                window_size=window_size,
+                max_length=max_length,
+                min_dense_tokens=32,
+            )
         elif self.config.cache_budget is not None:
-            window_size = 64  # Default window, budget controls total cache
+            # Use budget policy for fixed cache size
+            self.compression_policy = BudgetPolicy(
+                budget_tokens=self.config.cache_budget,
+                window_size=64,
+            )
         else:
-            window_size = 64  # Default
-        
-        self.compression_policy = CompressionPolicy(
-            window_size=window_size,
-            stride=window_size,  # Non-overlapping windows
-            min_tokens_before_compress=128,
-        )
+            # Default: window policy with standard settings
+            self.compression_policy = WindowPolicy(
+                window_size=64,
+                max_length=128,
+                min_dense_tokens=32,
+            )
     
     def generate(
         self,
@@ -281,19 +292,14 @@ class FMKVMethod(BaseMethod):
     
     def _should_compress(self, past_key_values, step: int) -> bool:
         """Determine if compression should be applied."""
-        if past_key_values is None:
+        if past_key_values is None or self.compression_policy is None:
             return False
         
         # Get current cache size
         cache_len = past_key_values[0][0].shape[2]
         
-        # Compress if cache exceeds budget
-        if self.config.cache_budget is not None:
-            return cache_len > self.config.cache_budget
-        
-        # Or compress at regular intervals based on window size
-        window_size = self.compression_policy.window_size
-        return cache_len > 0 and cache_len % window_size == 0
+        # Use policy's should_compress method
+        return self.compression_policy.should_compress(cache_len, new_tokens=1)
     
     def _compress_cache(
         self,
