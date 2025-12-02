@@ -85,8 +85,19 @@ class FMKVMethod(BaseMethod):
             weights_only=False,
         )
         
-        # Load config
-        config_dict = checkpoint.get("config", {})
+        # Load config - prefer "sidecar_config" (new format) over "config" (old format)
+        if "sidecar_config" in checkpoint:
+            config_dict = checkpoint["sidecar_config"]
+        elif "config" in checkpoint:
+            # Old format - might have training config mixed in, filter to valid SidecarConfig fields
+            config_dict = checkpoint["config"]
+            # Filter to only SidecarConfig fields (exclude training config fields)
+            from dataclasses import fields as dataclass_fields
+            valid_fields = {f.name for f in dataclass_fields(SidecarConfig)}
+            config_dict = {k: v for k, v in config_dict.items() if k in valid_fields}
+        else:
+            raise ValueError("Checkpoint missing both 'sidecar_config' and 'config' keys")
+        
         config = SidecarConfig(**config_dict)
         
         # Create and load Sidecar
