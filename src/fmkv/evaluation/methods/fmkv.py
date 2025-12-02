@@ -359,9 +359,19 @@ class FMKVMethod(BaseMethod):
                 k_flat = k_window.reshape(-1, window_size, head_dim)
                 v_flat = v_window.reshape(-1, window_size, head_dim)
                 
-                # Run through Sidecar
-                k_compressed = self.sidecar(k_flat)  # (batch * num_heads, 1, head_dim)
-                v_compressed = self.sidecar(v_flat)  # (batch * num_heads, 1, head_dim)
+                # Run through Sidecar - concatenate K and V first
+                # Sidecar expects (batch, window_size, 2*d_head)
+                kv_flat = torch.cat([k_flat, v_flat], dim=-1)  # (batch * num_heads, window_size, 2*head_dim)
+                
+                # Compress: (batch * num_heads, window_size, 2*head_dim) -> (batch * num_heads, 2*head_dim)
+                kv_compressed = self.sidecar(kv_flat, return_split=False)  # (batch * num_heads, 2*head_dim)
+                
+                # Split back into K and V
+                k_compressed, v_compressed = kv_compressed.chunk(2, dim=-1)  # Each: (batch * num_heads, head_dim)
+                
+                # Add sequence dimension: (batch * num_heads, head_dim) -> (batch * num_heads, 1, head_dim)
+                k_compressed = k_compressed.unsqueeze(1)
+                v_compressed = v_compressed.unsqueeze(1)
                 
                 # Reshape back: (batch, num_heads, 1, head_dim)
                 k_compressed = k_compressed.view(batch_size, num_heads, -1, head_dim)
@@ -404,7 +414,8 @@ class FMKVMethod(BaseMethod):
         """
         Compute loss with FMKV compression.
         
-        For perplexity evaluation, we compute loss with compressed cache.
+        For perplexity evaluation, we compute loss token-by-token
+        with compression applied to the KV cache.
         """
         if not self._is_setup:
             self.setup()
@@ -414,16 +425,63 @@ class FMKVMethod(BaseMethod):
         if attention_mask is not None:
             attention_mask = attention_mask.to(self.model.device)
         
-        # For perplexity, use standard forward pass
-        # Full integration with compression would require custom forward
-        with torch.no_grad():
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-            )
+        seq_len = input_ids.shape[1]
         
-        return outputs.loss
+        # Compute loss token-by-token with compression
+        # Process sequence in chunks, applying compression between chunks
+        total_loss = 0.0
+        past_key_values = None
+        processed_tokens = 0
+        
+        with torch.no_grad():
+            # Process in chunks to allow compression
+            chunk_size = 128  # Process chunks, then compress if needed
+            
+            for start_idx in range(0, seq_len, chunk_size):
+                end_idx = min(start_idx + chunk_size, seq_len)
+                chunk_len = end_idx - start_idx
+                
+                # Get chunk
+                chunk_input = input_ids[:, start_idx:end_idx]
+                chunk_mask = attention_mask[:, start_idx:end_idx] if attention_mask is not None else None
+                
+                # Forward pass
+                outputs = self.model(
+                    input_ids=chunk_input,
+                    attention_mask=chunk_mask,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+                
+                # Compute loss for this chunk manually
+                # logits: (batch, chunk_len, vocab_size)
+                logits = outputs.logits
+                chunk_labels = labels[:, start_idx:end_idx]
+                
+                # Shift labels to align with logits (next token prediction)
+                shift_logits = logits[:, :-1, :].contiguous()
+                shift_labels = chunk_labels[:, 1:].contiguous()
+                
+                # Compute cross-entropy loss
+                loss_fct = torch.nn.CrossEntropyLoss(reduction='sum')
+                chunk_loss = loss_fct(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1)
+                )
+                
+                total_loss += chunk_loss.item()
+                processed_tokens += (chunk_len - 1)  # -1 because of shifting
+                
+                # Update cache
+                past_key_values = outputs.past_key_values
+                
+                # Compress cache if needed
+                if past_key_values is not None and self._should_compress(past_key_values, 0):
+                    past_key_values, _ = self._compress_cache(past_key_values)
+        
+        # Return average loss
+        avg_loss = total_loss / processed_tokens if processed_tokens > 0 else 0.0
+        return torch.tensor(avg_loss, device=self.model.device)
     
     def get_cache_stats(self) -> dict:
         """Return cache statistics."""
