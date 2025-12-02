@@ -22,9 +22,11 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import PreTrainedTokenizer
 
-from fmkv.models.wrapper import ModelWrapper
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer
+    from fmkv.models.wrapper import ModelWrapper
 
 
 @dataclass
@@ -87,9 +89,9 @@ class TrajectoryCollector:
     
     def __init__(
         self,
-        model_wrapper: ModelWrapper,
+        model_wrapper: "ModelWrapper",
         config: TrajectoryConfig,
-        tokenizer: Optional[PreTrainedTokenizer] = None,
+        tokenizer: Optional["PreTrainedTokenizer"] = None,
     ):
         self.model = model_wrapper
         self.config = config
@@ -375,19 +377,76 @@ class TrajectoryCollector:
 def load_trajectories(
     path: Union[str, Path],
 ) -> List[TrajectoryWindow]:
-    """Load trajectories from disk."""
+    """
+    Load trajectories from disk.
+    
+    Supports multiple formats:
+    - checkpoint_*.pt files (from TrajectoryCollector)
+    - trajectories_*.pt files (from collect_trajectories.py script)
+    """
     path = Path(path)
     
     if path.is_dir():
-        # Load all checkpoints
+        # Load all trajectory files
         trajectories = []
-        for file in sorted(path.glob("checkpoint_*.pt")):
-            data = torch.load(file)
-            for w in data["windows"]:
-                trajectories.append(TrajectoryWindow(**w))
+        
+        # Try multiple patterns
+        patterns = ["checkpoint_*.pt", "trajectories_*.pt"]
+        files_found = []
+        
+        for pattern in patterns:
+            files_found.extend(sorted(path.glob(pattern)))
+        
+        if not files_found:
+            print(f"Warning: No trajectory files found in {path}")
+            print(f"  Looked for: {patterns}")
+            print(f"  Available files: {list(path.glob('*.pt'))}")
+            return trajectories
+        
+        print(f"Found {len(files_found)} trajectory files")
+        
+        for file in tqdm(files_found, desc="Loading trajectories"):
+            data = torch.load(file, weights_only=False)
+            
+            for w in data.get("windows", []):
+                # Handle different key formats
+                traj = _parse_trajectory_window(w)
+                if traj is not None:
+                    trajectories.append(traj)
+        
         return trajectories
     else:
         # Load single file
-        data = torch.load(path)
-        return [TrajectoryWindow(**w) for w in data["windows"]]
+        data = torch.load(path, weights_only=False)
+        return [_parse_trajectory_window(w) for w in data.get("windows", []) 
+                if _parse_trajectory_window(w) is not None]
+
+
+def _parse_trajectory_window(w: dict) -> Optional[TrajectoryWindow]:
+    """Parse a trajectory window dict, handling different formats."""
+    try:
+        # Handle different key names for queries
+        future_queries = w.get("future_queries")
+        if future_queries is None:
+            future_queries = w.get("queries")
+        
+        # Check if we have the required fields
+        if "keys" not in w or "values" not in w:
+            return None
+        
+        if future_queries is None:
+            return None
+        
+        return TrajectoryWindow(
+            layer_idx=w.get("layer_idx", 0),
+            window_idx=w.get("window_idx", 0),
+            keys=w["keys"],
+            values=w["values"],
+            future_queries=future_queries,
+            position_offset=w.get("position_offset", w.get("window_start", 0)),
+            sample_id=w.get("sample_id", "unknown"),
+        )
+    except Exception as e:
+        print(f"Warning: Failed to parse trajectory window: {e}")
+        return None
 
