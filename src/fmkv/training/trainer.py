@@ -377,17 +377,35 @@ class SidecarTrainer:
                 queries = torch.nn.functional.pad(queries, (0, k_dim - q_dim))
         
         # Forward through Sidecar
-        with autocast(device_type="cuda", dtype=self.autocast_dtype, enabled=self.scaler is not None):
-            k_cg, v_cg = self.sidecar.compress_cache(keys, values)
-            
-            # Compute loss
-            loss, metrics = self.loss_fn(
-                queries=queries,
-                keys=keys,
-                values=values,
-                k_cg=k_cg,
-                v_cg=v_cg,
-            )
+        # Use autocast compatible with both old and new PyTorch APIs
+        # Check PyTorch version to use correct API
+        if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast'):
+            # New API (PyTorch 2.0+): torch.amp.autocast(device_type="cuda", ...)
+            with torch.amp.autocast(device_type="cuda", dtype=self.autocast_dtype, enabled=self.scaler is not None):
+                k_cg, v_cg = self.sidecar.compress_cache(keys, values)
+                
+                # Compute loss
+                loss, metrics = self.loss_fn(
+                    queries=queries,
+                    keys=keys,
+                    values=values,
+                    k_cg=k_cg,
+                    v_cg=v_cg,
+                )
+        else:
+            # Old API (PyTorch < 2.0): torch.cuda.amp.autocast(enabled=bool)
+            # Note: old API doesn't support device_type or dtype parameters
+            with autocast(enabled=self.scaler is not None):
+                k_cg, v_cg = self.sidecar.compress_cache(keys, values)
+                
+                # Compute loss
+                loss, metrics = self.loss_fn(
+                    queries=queries,
+                    keys=keys,
+                    values=values,
+                    k_cg=k_cg,
+                    v_cg=v_cg,
+                )
         
         return loss, metrics
     
