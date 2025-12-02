@@ -131,7 +131,19 @@ class SidecarTrainer:
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.device = device
+        
+        # Convert Sidecar to device and dtype
         self.sidecar.to(device)
+        
+        # Convert to the specified dtype from config
+        dtype_map = {
+            "float32": torch.float32,
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+        }
+        target_dtype = dtype_map.get(sidecar.config.dtype, torch.float32)
+        self.sidecar = self.sidecar.to(dtype=target_dtype)
+        self.target_dtype = target_dtype  # Store for batch conversion
         
         # Setup output directory
         self.output_dir = Path(config.output_dir) / config.experiment_name
@@ -442,11 +454,15 @@ class SidecarTrainer:
         return total_loss / max(num_batches, 1)
     
     def _move_batch_to_device(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Move batch tensors to device."""
-        return {
-            k: v.to(self.device) if torch.is_tensor(v) else v
-            for k, v in batch.items()
-        }
+        """Move batch tensors to device and convert to target dtype."""
+        result = {}
+        for k, v in batch.items():
+            if torch.is_tensor(v):
+                # Move to device and convert dtype to match model
+                result[k] = v.to(device=self.device, dtype=self.target_dtype)
+            else:
+                result[k] = v
+        return result
     
     def _log_metrics(self, metrics: Dict[str, Any]):
         """Log metrics to wandb."""
