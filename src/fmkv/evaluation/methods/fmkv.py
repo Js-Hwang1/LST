@@ -467,11 +467,19 @@ class FMKVMethod(BaseMethod):
         """
         Compute loss for perplexity evaluation.
         
-        Note: For perplexity evaluation, we use standard forward pass without
-        compression. Compression is only applied during generation/inference,
-        not during perplexity calculation. This matches the theoretical framework
-        where compression preserves gradient forces for FUTURE queries, not
-        queries within the same sequence being processed.
+        IMPORTANT: For perplexity evaluation, we use standard forward pass WITHOUT
+        compression. This means perplexity scores will be identical to the dense
+        baseline, and do NOT test compression effectiveness.
+        
+        To actually test compression, use the 'generation' benchmark instead, which
+        applies compression during text generation (the intended use case).
+        
+        Rationale:
+        - Perplexity measures log-likelihood on a fixed sequence
+        - Compression is designed for autoregressive generation
+        - Applying compression mid-sequence would be inconsistent with training
+        - The theoretical framework preserves forces for FUTURE queries,
+          not for evaluating a pre-existing sequence
         
         Returns:
             Per-token averaged loss (matching dense.py behavior).

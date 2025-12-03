@@ -61,19 +61,27 @@ class Sidecar(nn.Module):
         
         # Output projection to K_CG, V_CG
         if config.output_projection:
+            # Create output projection with intermediate layer
+            proj_hidden = nn.Linear(config.encoder_hidden_dim, config.encoder_hidden_dim)
+            proj_output = nn.Linear(config.encoder_hidden_dim, config.output_dim)
+            
+            # Tag final layer for special initialization (Bug #14 fix)
+            proj_output._is_final_output = True
+            
             self.output_proj = nn.Sequential(
-                nn.Linear(config.encoder_hidden_dim, config.encoder_hidden_dim),
+                proj_hidden,
                 nn.GELU(),
-                nn.Linear(config.encoder_hidden_dim, config.output_dim),
+                proj_output,
             )
         else:
             # Direct projection if encoder_hidden_dim == output_dim
             if config.encoder_hidden_dim != config.output_dim:
                 self.output_proj = nn.Linear(config.encoder_hidden_dim, config.output_dim)
+                self.output_proj._is_final_output = True
             else:
                 self.output_proj = nn.Identity()
         
-        # Initialize weights
+        # Initialize weights (must be AFTER tagging layers)
         self.apply(self._init_weights)
         
         # Log parameter count
@@ -83,18 +91,26 @@ class Sidecar(nn.Module):
         """
         Initialize weights using Xavier/Glorot initialization with careful scaling.
         
-        Bug #6 Fix: Improved initialization to prevent output collapse.
-        Using larger scale for output projection to ensure non-zero outputs.
+        Bug #14 Fix: Properly detect and initialize output projection layers.
+        The previous fix didn't work because 'output_proj' wasn't in str(module).
+        Now we tag layers explicitly and use larger gains throughout.
         """
         if isinstance(module, nn.Linear):
-            # Use Xavier uniform with gain for better gradient flow
-            gain = 1.0
-            # For output projection, use larger gain to prevent vanishing outputs
-            if hasattr(module, '__name__') or 'output_proj' in str(module):
+            # Check if this is tagged as final output layer
+            is_final_output = getattr(module, '_is_final_output', False)
+            
+            if is_final_output:
+                # Extra large gain for final output to prevent vanishing
+                gain = 3.0
+            else:
+                # Use larger gain for all layers (helps gradient flow)
                 gain = 2.0
+            
             nn.init.xavier_uniform_(module.weight, gain=gain)
+            
             if module.bias is not None:
-                nn.init.zeros_(module.bias)
+                # Small positive bias to break symmetry
+                nn.init.constant_(module.bias, 0.01)
         elif isinstance(module, nn.LayerNorm):
             nn.init.ones_(module.weight)
             nn.init.zeros_(module.bias)

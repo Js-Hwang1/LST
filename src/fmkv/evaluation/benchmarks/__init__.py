@@ -3,6 +3,7 @@ Benchmark implementations for KV cache compression evaluation.
 
 Standard benchmarks:
 - Perplexity: Language modeling quality (WikiText-2, WikiText-103, C4)
+- Generation: Text generation with compression (Bug #13 fix)
 - Passkey Retrieval: Long-context retrieval accuracy
 - LongBench: Comprehensive long-context benchmark suite
 - Needle-in-Haystack: Single fact retrieval in long context
@@ -12,6 +13,7 @@ Standard benchmarks:
 
 from .base import BaseBenchmark, BenchmarkResult
 from .perplexity import PerplexityBenchmark
+from .generation import GenerationBenchmark
 from .passkey import PasskeyRetrievalBenchmark
 from .needle import NeedleInHaystackBenchmark
 from .longbench import LongBenchBenchmark
@@ -21,6 +23,7 @@ __all__ = [
     "BaseBenchmark",
     "BenchmarkResult",
     "PerplexityBenchmark",
+    "GenerationBenchmark",
     "PasskeyRetrievalBenchmark",
     "NeedleInHaystackBenchmark",
     "LongBenchBenchmark",
@@ -31,6 +34,7 @@ __all__ = [
 
 _BENCHMARK_REGISTRY = {
     "perplexity": PerplexityBenchmark,
+    "generation": GenerationBenchmark,
     "passkey": PasskeyRetrievalBenchmark,
     "needle": NeedleInHaystackBenchmark,
     "longbench": LongBenchBenchmark,

@@ -42,7 +42,7 @@ wandb_tags: []
 num_workers: 4
 prefetch_factor: 2
 
-# Early stopping (Bug #9 Fix: Increased patience to allow more training)
-early_stopping_patience: 20  # Increased from 10 to 20
-early_stopping_threshold: 1.0e-4
+# Early stopping (Bug #16 Fix: Further increased patience and relaxed threshold)
+early_stopping_patience: 50  # Increased from 20 to 50 (allows ~25k steps before stopping)
+early_stopping_threshold: 1.0e-5  # Relaxed from 1e-4 to 1e-5 (smaller improvement needed)
 
