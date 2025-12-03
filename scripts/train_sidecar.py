@@ -89,6 +89,19 @@ def parse_args():
         help="Number of encoder layers",
     )
     
+    # Bug #19 Fix: Multi-window training
+    parser.add_argument(
+        "--num_windows_per_sample",
+        type=int,
+        default=4,
+        help="Number of windows per training sample (for multi-window training)",
+    )
+    parser.add_argument(
+        "--use_multi_window",
+        action="store_true",
+        help="Use multi-window dataset (trains with multiple super-tokens)",
+    )
+    
     # Training
     parser.add_argument(
         "--output_dir",
@@ -268,12 +281,27 @@ def main():
     
     # Load data
     print(f"\nLoading trajectories from {args.trajectories_path}...")
-    dataset = ForceMatchingDataset.from_trajectories(
-        trajectories_path=args.trajectories_path,
-        gradients_path=args.gradients_path,
-        window_size=args.window_size,
-        d_head=d_head,
-    )
+    
+    if args.use_multi_window:
+        # Bug #19 Fix: Use multi-window dataset for non-trivial attention
+        from fmkv.data.multi_window_dataset import MultiWindowDataset
+        
+        dataset = MultiWindowDataset.from_trajectories(
+            trajectories_path=args.trajectories_path,
+            num_windows_per_sample=args.num_windows_per_sample,
+            window_size=args.window_size,
+            d_head=d_head,
+        )
+        print(f"Using multi-window dataset: {args.num_windows_per_sample} windows per sample")
+    else:
+        # Standard single-window dataset
+        dataset = ForceMatchingDataset.from_trajectories(
+            trajectories_path=args.trajectories_path,
+            gradients_path=args.gradients_path,
+            window_size=args.window_size,
+            d_head=d_head,
+        )
+    
     print(f"Loaded {len(dataset)} training samples")
     
     # Split into train/eval

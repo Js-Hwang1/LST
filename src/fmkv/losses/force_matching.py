@@ -141,26 +141,28 @@ class ForceMatchingLoss(nn.Module):
         v_cg: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute the Jacobian for compressed (single super-token) attention.
+        Compute the Jacobian for compressed attention.
         
-        With a single KV pair, the attention is trivial (always 1.0),
-        but the Jacobian captures how the query direction affects output.
+        Bug #19 Fix: k_cg and v_cg can now have multiple super-tokens (seq_len > 1).
+        This makes attention non-trivial and Jacobian non-zero.
         
         Args:
             queries: Shape (batch, num_queries, d_head)
-            k_cg: Compressed key, shape (batch, d_head)
-            v_cg: Compressed value, shape (batch, d_head)
+            k_cg: Compressed keys, shape (batch, num_compressed, d_head) or (batch, d_head)
+            v_cg: Compressed values, shape (batch, num_compressed, d_head) or (batch, d_head)
         
         Returns:
             Tuple of:
                 - aggregate_jacobian: Shape (batch, d_head, d_head)
                 - attention_outputs: Shape (batch, num_queries, d_head)
         """
-        # Expand compressed KV to have sequence dimension
-        k_cg = k_cg.unsqueeze(1)  # (batch, 1, d)
-        v_cg = v_cg.unsqueeze(1)  # (batch, 1, d)
+        # Handle both single super-token and multiple super-tokens
+        if k_cg.dim() == 2:
+            k_cg = k_cg.unsqueeze(1)  # (batch, 1, d)
+            v_cg = v_cg.unsqueeze(1)  # (batch, 1, d)
+        # Otherwise k_cg/v_cg already have shape (batch, num_compressed, d)
         
-        # Compute Jacobians
+        # Compute Jacobians - now non-trivial if num_compressed > 1
         jacobians = compute_attention_jacobian_batched(
             queries, k_cg, v_cg, self.scale
         )  # (batch, num_q, d, d)
@@ -168,10 +170,9 @@ class ForceMatchingLoss(nn.Module):
         # Sum over queries
         aggregate_jacobian = jacobians.sum(dim=1)  # (batch, d, d)
         
-        # Attention output (with single token, weight is always 1)
-        # But we still compute properly for numerical consistency
+        # Attention output - now uses real softmax over multiple tokens
         scores = torch.matmul(queries, k_cg.transpose(-2, -1)) * self.scale
-        attn_weights = F.softmax(scores, dim=-1)  # All 1s
+        attn_weights = F.softmax(scores, dim=-1)
         attention_outputs = torch.matmul(attn_weights, v_cg)  # (batch, num_q, d)
         
         return aggregate_jacobian, attention_outputs

@@ -379,6 +379,12 @@ class SidecarTrainer:
         values = batch["values"]
         queries = batch["queries"]
         
+        # Bug #19 Fix: Handle multi-window training
+        # keys/values can be either:
+        # - (batch, seq_len, d_head) - single window
+        # - (batch, num_windows, seq_len, d_head) - multiple windows
+        is_multi_window = keys.dim() == 4
+        
         # Handle query dimension mismatch
         # Queries from hidden states may have different dim than keys
         q_dim = queries.size(-1)
@@ -396,13 +402,20 @@ class SidecarTrainer:
         if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast'):
             # New API (PyTorch 2.0+): torch.amp.autocast(device_type="cuda", ...)
             with torch.amp.autocast(device_type="cuda", dtype=self.autocast_dtype, enabled=self.scaler is not None):
-                k_cg, v_cg = self.sidecar.compress_cache(keys, values)
+                if is_multi_window:
+                    # Compress each window separately
+                    k_cg, v_cg = self._compress_multi_window(keys, values)
+                    # Compute dense attention over all original windows
+                    keys_dense, values_dense = self._flatten_windows(keys, values)
+                else:
+                    k_cg, v_cg = self.sidecar.compress_cache(keys, values)
+                    keys_dense, values_dense = keys, values
                 
                 # Compute loss
                 loss, metrics = self.loss_fn(
                     queries=queries,
-                    keys=keys,
-                    values=values,
+                    keys=keys_dense,
+                    values=values_dense,
                     k_cg=k_cg,
                     v_cg=v_cg,
                 )
@@ -410,13 +423,18 @@ class SidecarTrainer:
             # Old API (PyTorch < 2.0): torch.cuda.amp.autocast(enabled=bool)
             # Note: old API doesn't support device_type or dtype parameters
             with autocast(enabled=self.scaler is not None):
-                k_cg, v_cg = self.sidecar.compress_cache(keys, values)
+                if is_multi_window:
+                    k_cg, v_cg = self._compress_multi_window(keys, values)
+                    keys_dense, values_dense = self._flatten_windows(keys, values)
+                else:
+                    k_cg, v_cg = self.sidecar.compress_cache(keys, values)
+                    keys_dense, values_dense = keys, values
                 
                 # Compute loss
                 loss, metrics = self.loss_fn(
                     queries=queries,
-                    keys=keys,
-                    values=values,
+                    keys=keys_dense,
+                    values=values_dense,
                     k_cg=k_cg,
                     v_cg=v_cg,
                 )
@@ -439,9 +457,64 @@ class SidecarTrainer:
             
             # Add to metrics (always, not just at log_steps)
             metrics["output/k_cg_norm"] = k_norm
-            metrics["output/v_cg_norm"] = v_norm
+            metrics["output/v_cg_norm"] = v_cg_norm
         
         return loss, metrics
+    
+    def _compress_multi_window(
+        self,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compress multiple windows separately.
+        
+        Bug #19 Fix: Compresses each window into a super-token, resulting in
+        multiple super-tokens that make attention non-trivial.
+        
+        Args:
+            keys: (batch, num_windows, seq_len, d_head)
+            values: (batch, num_windows, seq_len, d_head)
+        
+        Returns:
+            k_cg: (batch, num_windows, d_head) - one super-token per window
+            v_cg: (batch, num_windows, d_head)
+        """
+        batch_size, num_windows, seq_len, d_head = keys.shape
+        
+        # Reshape to (batch * num_windows, seq_len, d_head)
+        keys_flat = keys.reshape(batch_size * num_windows, seq_len, d_head)
+        values_flat = values.reshape(batch_size * num_windows, seq_len, d_head)
+        
+        # Compress each window
+        k_cg_flat, v_cg_flat = self.sidecar.compress_cache(keys_flat, values_flat)
+        
+        # Reshape back to (batch, num_windows, d_head)
+        k_cg = k_cg_flat.reshape(batch_size, num_windows, d_head)
+        v_cg = v_cg_flat.reshape(batch_size, num_windows, d_head)
+        
+        return k_cg, v_cg
+    
+    def _flatten_windows(
+        self,
+        keys: torch.Tensor,
+        values: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Flatten multiple windows into a single sequence for dense attention.
+        
+        Args:
+            keys: (batch, num_windows, seq_len, d_head)
+            values: (batch, num_windows, seq_len, d_head)
+        
+        Returns:
+            keys_flat: (batch, num_windows * seq_len, d_head)
+            values_flat: (batch, num_windows * seq_len, d_head)
+        """
+        batch_size, num_windows, seq_len, d_head = keys.shape
+        keys_flat = keys.reshape(batch_size, num_windows * seq_len, d_head)
+        values_flat = values.reshape(batch_size, num_windows * seq_len, d_head)
+        return keys_flat, values_flat
     
     @torch.no_grad()
     def _evaluate(self, dataloader: DataLoader) -> float:
