@@ -37,18 +37,23 @@ from fmkv.losses.jacobian import (
 @dataclass
 class ForceMatchingLossConfig:
     """Configuration for Force Matching Loss."""
-    
+
     # Number of future queries to sample for force matching
     num_future_queries: int = 16
-    
+
     # Loss weighting (Bug #8 Fix: Increased magnitude weight)
     force_matching_weight: float = 1.0
     consistency_weight: float = 0.1
     output_magnitude_weight: float = 0.2  # Increased from 0.05 to prevent output collapse
-    
+
+    # Bug #29 Fix: Anti-collapse regularization
+    # Penalizes when cg_jacobian norm falls below dense_jacobian norm
+    jacobian_norm_weight: float = 0.5  # Weight for Jacobian norm matching
+    min_jacobian_ratio: float = 0.1  # Minimum allowed ratio of cg_norm / dense_norm
+
     # Normalization
     normalize_jacobian: bool = True
-    
+
     # Gradient clipping for stability (Bug #6 Fix: Increased from 10.0)
     jacobian_clip_value: Optional[float] = 50.0  # Increased to allow larger gradients
 
@@ -249,12 +254,33 @@ class ForceMatchingLoss(nn.Module):
         dense_norm = dense_outputs.norm(dim=-1).mean(dim=-1)  # (batch,)
         cg_norm = cg_outputs.norm(dim=-1).mean(dim=-1)  # (batch,)
         magnitude_loss = (dense_norm - cg_norm) ** 2
-        
+
+        # === Bug #29 Fix: Jacobian Norm Anti-Collapse Loss ===
+        # Prevent the cg_jacobian from collapsing to zero
+        # Compute Jacobian norms
+        dense_jac_norm = dense_jacobian.norm(dim=(-2, -1))  # (batch,)
+        cg_jac_norm = cg_jacobian.norm(dim=(-2, -1))  # (batch,)
+
+        # Two-part anti-collapse:
+        # 1. Match Jacobian norms (encourage cg to have similar magnitude as dense)
+        jacobian_norm_loss = (dense_jac_norm - cg_jac_norm) ** 2 / (self.d_head ** 2)
+
+        # 2. Penalty when cg_norm ratio drops below threshold
+        # This provides a hard floor to prevent complete collapse
+        jac_ratio = cg_jac_norm / (dense_jac_norm + 1e-8)
+        collapse_penalty = F.relu(self.config.min_jacobian_ratio - jac_ratio) ** 2
+        # Scale penalty to be significant
+        collapse_penalty = collapse_penalty * dense_jac_norm.detach() ** 2 / (self.d_head ** 2)
+
+        # Combined anti-collapse loss
+        anti_collapse_loss = jacobian_norm_loss + collapse_penalty
+
         # === Total Loss ===
         total_loss = (
             self.config.force_matching_weight * force_matching_loss +
             self.config.consistency_weight * consistency_loss +
-            self.config.output_magnitude_weight * magnitude_loss
+            self.config.output_magnitude_weight * magnitude_loss +
+            self.config.jacobian_norm_weight * anti_collapse_loss
         )
         
         # Reduction
@@ -263,19 +289,31 @@ class ForceMatchingLoss(nn.Module):
             force_matching_loss = force_matching_loss.mean()
             consistency_loss = consistency_loss.mean()
             magnitude_loss = magnitude_loss.mean()
+            anti_collapse_loss = anti_collapse_loss.mean()
+            jacobian_norm_loss = jacobian_norm_loss.mean()
+            collapse_penalty = collapse_penalty.mean()
+            jac_ratio = jac_ratio.mean()
         elif reduction == "sum":
             total_loss = total_loss.sum()
             force_matching_loss = force_matching_loss.sum()
             consistency_loss = consistency_loss.sum()
             magnitude_loss = magnitude_loss.sum()
-        
+            anti_collapse_loss = anti_collapse_loss.sum()
+            jacobian_norm_loss = jacobian_norm_loss.sum()
+            collapse_penalty = collapse_penalty.sum()
+            jac_ratio = jac_ratio.mean()  # Still mean for ratio
+
         metrics = {
             "loss/total": total_loss.detach(),
             "loss/force_matching": force_matching_loss.detach(),
             "loss/consistency": consistency_loss.detach(),
             "loss/magnitude": magnitude_loss.detach(),
-            "jacobian/dense_norm": dense_jacobian.norm(dim=(-2, -1)).mean().detach(),
-            "jacobian/cg_norm": cg_jacobian.norm(dim=(-2, -1)).mean().detach(),
+            "loss/anti_collapse": anti_collapse_loss.detach(),
+            "loss/jacobian_norm": jacobian_norm_loss.detach(),
+            "loss/collapse_penalty": collapse_penalty.detach(),
+            "jacobian/dense_norm": dense_jac_norm.mean().detach(),
+            "jacobian/cg_norm": cg_jac_norm.mean().detach(),
+            "jacobian/ratio": jac_ratio.detach(),  # Key metric to watch!
             "output/dense_norm": dense_norm.mean().detach(),
             "output/cg_norm": cg_norm.mean().detach(),
         }
