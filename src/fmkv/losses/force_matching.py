@@ -51,6 +51,10 @@ class ForceMatchingLossConfig:
     jacobian_norm_weight: float = 0.5  # Weight for Jacobian norm matching
     min_jacobian_ratio: float = 0.1  # Minimum allowed ratio of cg_norm / dense_norm
 
+    # Bug #30 Fix: Diversity loss to prevent window collapse
+    # When multi-window training produces similar outputs, Jacobian -> 0
+    diversity_weight: float = 1.0  # Weight for diversity regularization
+
     # Normalization
     normalize_jacobian: bool = True
 
@@ -275,12 +279,45 @@ class ForceMatchingLoss(nn.Module):
         # Combined anti-collapse loss
         anti_collapse_loss = jacobian_norm_loss + collapse_penalty
 
+        # === Bug #30 Fix: Diversity Loss ===
+        # Prevent compressed tokens from collapsing to identical outputs
+        # When k_cg tokens are identical, softmax becomes uniform, Jacobian -> 0
+        diversity_loss = torch.zeros(batch_size, device=k_cg.device, dtype=k_cg.dtype)
+
+        if k_cg.dim() == 3 and k_cg.size(1) > 1:
+            # k_cg: (batch, num_windows, d_head)
+            num_windows = k_cg.size(1)
+
+            # Normalize for cosine similarity
+            k_cg_norm = F.normalize(k_cg, dim=-1)  # (batch, num_windows, d_head)
+            v_cg_norm = F.normalize(v_cg, dim=-1)
+
+            # Compute pairwise cosine similarity matrix
+            # (batch, num_windows, num_windows)
+            k_sim = torch.bmm(k_cg_norm, k_cg_norm.transpose(-2, -1))
+            v_sim = torch.bmm(v_cg_norm, v_cg_norm.transpose(-2, -1))
+
+            # We want OFF-DIAGONAL elements to be small (diverse outputs)
+            # Create mask to exclude diagonal
+            eye = torch.eye(num_windows, device=k_cg.device, dtype=k_cg.dtype)
+            off_diag_mask = 1.0 - eye  # (num_windows, num_windows)
+
+            # Penalize high similarity between different windows
+            # Use squared similarity to make gradient stronger near 1
+            k_off_diag = (k_sim * off_diag_mask).pow(2).sum(dim=(-2, -1))
+            v_off_diag = (v_sim * off_diag_mask).pow(2).sum(dim=(-2, -1))
+
+            # Normalize by number of off-diagonal pairs
+            num_pairs = num_windows * (num_windows - 1)
+            diversity_loss = (k_off_diag + v_off_diag) / (2 * num_pairs)
+
         # === Total Loss ===
         total_loss = (
             self.config.force_matching_weight * force_matching_loss +
             self.config.consistency_weight * consistency_loss +
             self.config.output_magnitude_weight * magnitude_loss +
-            self.config.jacobian_norm_weight * anti_collapse_loss
+            self.config.jacobian_norm_weight * anti_collapse_loss +
+            self.config.diversity_weight * diversity_loss
         )
         
         # Reduction
@@ -292,6 +329,7 @@ class ForceMatchingLoss(nn.Module):
             anti_collapse_loss = anti_collapse_loss.mean()
             jacobian_norm_loss = jacobian_norm_loss.mean()
             collapse_penalty = collapse_penalty.mean()
+            diversity_loss = diversity_loss.mean()
             jac_ratio = jac_ratio.mean()
         elif reduction == "sum":
             total_loss = total_loss.sum()
@@ -301,6 +339,7 @@ class ForceMatchingLoss(nn.Module):
             anti_collapse_loss = anti_collapse_loss.sum()
             jacobian_norm_loss = jacobian_norm_loss.sum()
             collapse_penalty = collapse_penalty.sum()
+            diversity_loss = diversity_loss.sum()
             jac_ratio = jac_ratio.mean()  # Still mean for ratio
 
         metrics = {
@@ -311,6 +350,7 @@ class ForceMatchingLoss(nn.Module):
             "loss/anti_collapse": anti_collapse_loss.detach(),
             "loss/jacobian_norm": jacobian_norm_loss.detach(),
             "loss/collapse_penalty": collapse_penalty.detach(),
+            "loss/diversity": diversity_loss.detach(),  # Bug #30: Track window diversity
             "jacobian/dense_norm": dense_jac_norm.mean().detach(),
             "jacobian/cg_norm": cg_jac_norm.mean().detach(),
             "jacobian/ratio": jac_ratio.detach(),  # Key metric to watch!
