@@ -568,9 +568,21 @@ class SidecarTrainer:
                     queries = queries[..., :k_dim]
                 else:
                     queries = torch.nn.functional.pad(queries, (0, k_dim - q_dim))
-            
-            k_cg, v_cg = self.sidecar.compress_cache(keys, values)
-            loss, _ = self.loss_fn(queries, keys, values, k_cg, v_cg)
+
+            # Bug #22 Fix: Handle multi-window evaluation (same as training)
+            # keys/values can be either:
+            # - (batch, seq_len, d_head) - single window (3D)
+            # - (batch, num_windows, seq_len, d_head) - multiple windows (4D)
+            is_multi_window = keys.dim() == 4
+
+            if is_multi_window:
+                k_cg, v_cg = self._compress_multi_window(keys, values)
+                keys_dense, values_dense = self._flatten_windows(keys, values)
+            else:
+                k_cg, v_cg = self.sidecar.compress_cache(keys, values)
+                keys_dense, values_dense = keys, values
+
+            loss, _ = self.loss_fn(queries, keys_dense, values_dense, k_cg, v_cg)
             
             total_loss += loss.item()
             num_batches += 1
