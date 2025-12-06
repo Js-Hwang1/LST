@@ -470,44 +470,100 @@ class FMKVMethod(BaseMethod):
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Compute loss for perplexity evaluation.
-        
-        IMPORTANT: For perplexity evaluation, we use standard forward pass WITHOUT
-        compression. This means perplexity scores will be identical to the dense
-        baseline, and do NOT test compression effectiveness.
-        
-        To actually test compression, use the 'generation' benchmark instead, which
-        applies compression during text generation (the intended use case).
-        
-        Rationale:
-        - Perplexity measures log-likelihood on a fixed sequence
-        - Compression is designed for autoregressive generation
-        - Applying compression mid-sequence would be inconsistent with training
-        - The theoretical framework preserves forces for FUTURE queries,
-          not for evaluating a pre-existing sequence
-        
+        Compute loss for perplexity evaluation WITH compression applied.
+
+        Strategy for testing compression quality:
+        1. Split sequence into prefix (to compress) and suffix (to evaluate)
+        2. Run prefix through model to get KV cache
+        3. Compress the prefix KV cache using Sidecar
+        4. Run suffix through model using compressed cache as past_key_values
+        5. Compute loss on suffix predictions
+
+        This properly tests how well compression preserves language modeling.
+
         Returns:
-            Per-token averaged loss (matching dense.py behavior).
+            Per-token averaged loss.
         """
         if not self._is_setup:
             self.setup()
-        
+
         input_ids = input_ids.to(self.model.device)
         labels = labels.to(self.model.device)
         if attention_mask is not None:
             attention_mask = attention_mask.to(self.model.device)
-        
+
+        seq_len = input_ids.shape[1]
+        batch_size = input_ids.shape[0]
+
         with torch.no_grad():
-            # Standard forward pass - same as dense method
-            # The model handles label shifting and loss computation internally
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
+            # Check if we should apply compression
+            window_size = getattr(self.compression_policy, 'window_size', 64) if self.compression_policy else 64
+            min_prefix_len = window_size * 2  # Need at least 2 windows for meaningful compression
+            min_suffix_len = 64  # Need enough suffix for loss computation
+
+            should_compress = (
+                self.sidecar is not None
+                and seq_len > min_prefix_len + min_suffix_len
+                and self.config.compression_ratio is not None
+                and self.config.compression_ratio < 1.0
             )
-            
-            loss = outputs.loss
-            
+
+            if not should_compress:
+                # Fall back to dense evaluation for short sequences
+                outputs = self.model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
+                return outputs.loss
+
+            # Split sequence: compress prefix, evaluate on suffix
+            # Use most of the sequence as prefix to test compression
+            prefix_len = seq_len - min_suffix_len
+            prefix_ids = input_ids[:, :prefix_len]
+            suffix_ids = input_ids[:, prefix_len:]
+            suffix_labels = labels[:, prefix_len:]
+
+            # Step 1: Forward pass on prefix to get KV cache
+            prefix_outputs = self.model(
+                input_ids=prefix_ids,
+                use_cache=True,
+                return_dict=True,
+            )
+            past_key_values = prefix_outputs.past_key_values
+
+            # Step 2: Compress the prefix KV cache
+            compressed_kv, num_compressed = self._compress_cache_for_eval(past_key_values)
+
+            # Step 3: Forward pass on suffix using compressed cache
+            # The model will attend to the compressed prefix + suffix tokens
+            suffix_outputs = self.model(
+                input_ids=suffix_ids,
+                past_key_values=compressed_kv,
+                use_cache=False,
+                return_dict=True,
+            )
+
+            # Step 4: Compute loss on suffix
+            logits = suffix_outputs.logits
+            # Shift for next-token prediction
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = suffix_labels[:, 1:].contiguous()
+
+            # Compute cross-entropy loss
+            loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
+            loss = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1)
+            )
+
+            # Log compression stats
+            compressed_len = compressed_kv[0][0].shape[2] if compressed_kv else prefix_len
+            logger.debug(
+                f"Compressed prefix: {prefix_len} -> {compressed_len} tokens, "
+                f"suffix length: {suffix_ids.shape[1]}"
+            )
+
             # Validate loss is finite
             if not torch.isfinite(loss):
                 import warnings
@@ -516,10 +572,110 @@ class FMKVMethod(BaseMethod):
                     f"input_ids shape: {input_ids.shape}, "
                     f"loss value: {loss.item()}"
                 )
-                # Return a large but finite loss instead of inf
                 return torch.tensor(100.0, device=self.model.device)
-        
+
         return loss
+
+    def _compress_cache_for_eval(
+        self,
+        past_key_values: tuple,
+    ) -> tuple[tuple, int]:
+        """
+        Compress KV cache for perplexity evaluation.
+
+        Unlike generation, this compresses the entire prefix to simulate
+        what the cache would look like after compression during generation.
+        """
+        if self.sidecar is None:
+            return past_key_values, 0
+
+        window_size = getattr(self.compression_policy, 'window_size', 64) if self.compression_policy else 64
+        num_layers = len(past_key_values)
+
+        compressed_kv = []
+        total_compressed = 0
+
+        for layer_idx in range(num_layers):
+            keys, values = past_key_values[layer_idx]
+            batch_size, num_heads, seq_len, head_dim = keys.shape
+
+            if seq_len < window_size:
+                compressed_kv.append((keys, values))
+                continue
+
+            # Determine how many windows to compress based on compression ratio
+            target_ratio = self.config.compression_ratio or 0.5
+            target_len = max(window_size, int(seq_len * target_ratio))
+            num_to_compress = seq_len - target_len
+
+            if num_to_compress < window_size:
+                compressed_kv.append((keys, values))
+                continue
+
+            # Compress in windows
+            num_windows = num_to_compress // window_size
+            compress_end = num_windows * window_size
+
+            # Extract windows to compress
+            k_to_compress = keys[:, :, :compress_end, :]
+            v_to_compress = values[:, :, :compress_end, :]
+
+            # Reshape for Sidecar processing
+            k_windows = k_to_compress.view(
+                batch_size, num_heads, num_windows, window_size, head_dim
+            )
+            v_windows = v_to_compress.view(
+                batch_size, num_heads, num_windows, window_size, head_dim
+            )
+
+            # Process each window through Sidecar
+            compressed_k_list = []
+            compressed_v_list = []
+
+            for w in range(num_windows):
+                k_window = k_windows[:, :, w, :, :]  # (batch, heads, window, dim)
+                v_window = v_windows[:, :, w, :, :]
+
+                # Reshape: (batch, heads, window, dim) -> (batch*heads, window, dim)
+                k_flat = k_window.reshape(batch_size * num_heads, window_size, head_dim)
+                v_flat = v_window.reshape(batch_size * num_heads, window_size, head_dim)
+
+                # Concatenate K, V for Sidecar input
+                kv_flat = torch.cat([k_flat, v_flat], dim=-1)
+
+                # Compress
+                kv_compressed = self.sidecar(kv_flat, return_split=False)
+                k_comp, v_comp = kv_compressed.chunk(2, dim=-1)
+
+                # Reshape back: (batch*heads, dim) -> (batch, heads, 1, dim)
+                k_comp = k_comp.view(batch_size, num_heads, 1, head_dim)
+                v_comp = v_comp.view(batch_size, num_heads, 1, head_dim)
+
+                compressed_k_list.append(k_comp)
+                compressed_v_list.append(v_comp)
+
+            # Concatenate compressed windows
+            if compressed_k_list:
+                compressed_keys = torch.cat(compressed_k_list, dim=2)
+                compressed_values = torch.cat(compressed_v_list, dim=2)
+
+                # Add remaining uncompressed tokens
+                if compress_end < seq_len:
+                    compressed_keys = torch.cat([
+                        compressed_keys,
+                        keys[:, :, compress_end:, :]
+                    ], dim=2)
+                    compressed_values = torch.cat([
+                        compressed_values,
+                        values[:, :, compress_end:, :]
+                    ], dim=2)
+
+                compressed_kv.append((compressed_keys, compressed_values))
+                total_compressed += compress_end
+            else:
+                compressed_kv.append((keys, values))
+
+        return tuple(compressed_kv), total_compressed
     
     def get_cache_stats(self) -> dict:
         """Return cache statistics."""

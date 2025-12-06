@@ -89,7 +89,9 @@ def parse_args():
         help="Number of encoder layers",
     )
     
-    # Bug #19 Fix: Multi-window training
+    # Bug #19 Fix: Multi-window training (NOW ENABLED BY DEFAULT)
+    # Without multi-window, single super-token attention is trivial (softmax=1.0)
+    # and the Jacobian is mathematically zero, making force matching impossible.
     parser.add_argument(
         "--num_windows_per_sample",
         type=int,
@@ -99,7 +101,14 @@ def parse_args():
     parser.add_argument(
         "--use_multi_window",
         action="store_true",
-        help="Use multi-window dataset (trains with multiple super-tokens)",
+        default=True,  # CHANGED: Now True by default - required for non-zero Jacobians
+        help="Use multi-window dataset (trains with multiple super-tokens). "
+             "Required for force matching to work (single token has zero Jacobian).",
+    )
+    parser.add_argument(
+        "--use_single_window",
+        action="store_true",
+        help="Force single-window mode (NOT RECOMMENDED: Jacobian will be zero)",
     )
     
     # Training
@@ -282,10 +291,14 @@ def main():
     # Load data
     print(f"\nLoading trajectories from {args.trajectories_path}...")
     
-    if args.use_multi_window:
+    # Determine whether to use multi-window (default) or single-window
+    use_multi_window = args.use_multi_window and not args.use_single_window
+
+    if use_multi_window:
         # Bug #19 Fix: Use multi-window dataset for non-trivial attention
+        # This is REQUIRED for force matching - single token has zero Jacobian
         from fmkv.data.multi_window_dataset import MultiWindowDataset
-        
+
         dataset = MultiWindowDataset.from_trajectories(
             trajectories_path=args.trajectories_path,
             num_windows_per_sample=args.num_windows_per_sample,
@@ -293,8 +306,12 @@ def main():
             d_head=d_head,
         )
         print(f"Using multi-window dataset: {args.num_windows_per_sample} windows per sample")
+        print(f"  (Required for non-zero Jacobian / force matching)")
     else:
-        # Standard single-window dataset
+        # Single-window dataset - WILL HAVE ZERO JACOBIAN
+        print("WARNING: Using single-window mode. Jacobian will be zero!")
+        print("         Force matching loss will not train the Sidecar properly.")
+        print("         Use --use_multi_window (default) for proper training.")
         dataset = ForceMatchingDataset.from_trajectories(
             trajectories_path=args.trajectories_path,
             gradients_path=args.gradients_path,
