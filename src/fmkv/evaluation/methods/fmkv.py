@@ -268,10 +268,14 @@ class FMKVMethod(BaseMethod):
             # Track compression stats
             total_compressed = 0
             total_original = input_ids.shape[1]
-            
+
+            # Bug #23 Fix: Track current position for RoPE
+            # After compression, position_id must reflect compressed cache length
+            current_position = input_ids.shape[1]  # Start after initial input
+
             # Generate tokens one at a time
             generated_tokens = []
-            
+
             for step in range(max_new_tokens):
                 # Sample next token
                 if kwargs.get("do_sample", False):
@@ -279,28 +283,41 @@ class FMKVMethod(BaseMethod):
                     next_token = torch.multinomial(probs, num_samples=1)
                 else:
                     next_token = next_token_logits.argmax(dim=-1, keepdim=True)
-                
+
                 generated_tokens.append(next_token)
-                
+
                 # Check for EOS
                 if (next_token == self.tokenizer.eos_token_id).all():
                     break
-                
+
                 # Compress KV cache if needed
                 if self._should_compress(past_key_values, step):
+                    old_cache_len = past_key_values[0][0].shape[2]
                     past_key_values, num_compressed = self._compress_cache(past_key_values)
+                    new_cache_len = past_key_values[0][0].shape[2]
                     total_compressed += num_compressed
-                
+                    # Update position to reflect compressed cache
+                    current_position = new_cache_len
+
+                # Compute position_id for this token
+                position_ids = torch.tensor(
+                    [[current_position]],
+                    dtype=torch.long,
+                    device=self.model.device,
+                )
+
                 # Forward pass with new token
                 outputs = self.model(
                     input_ids=next_token,
                     past_key_values=past_key_values,
+                    position_ids=position_ids,
                     use_cache=True,
                     return_dict=True,
                 )
-                
+
                 past_key_values = outputs.past_key_values
                 next_token_logits = outputs.logits[:, -1, :]
+                current_position += 1  # Increment for next token
             
             # Concatenate generated tokens
             if generated_tokens:
@@ -535,11 +552,24 @@ class FMKVMethod(BaseMethod):
             # Step 2: Compress the prefix KV cache
             compressed_kv, num_compressed = self._compress_cache_for_eval(past_key_values)
 
+            # Bug #23 Fix: Compute position_ids for suffix
+            # With RoPE, position IDs must account for compressed cache length
+            # The suffix tokens should have positions starting AFTER the compressed cache
+            compressed_cache_len = compressed_kv[0][0].shape[2] if compressed_kv else 0
+            suffix_len = suffix_ids.shape[1]
+            position_ids = torch.arange(
+                compressed_cache_len,
+                compressed_cache_len + suffix_len,
+                dtype=torch.long,
+                device=self.model.device,
+            ).unsqueeze(0).expand(batch_size, -1)
+
             # Step 3: Forward pass on suffix using compressed cache
             # The model will attend to the compressed prefix + suffix tokens
             suffix_outputs = self.model(
                 input_ids=suffix_ids,
                 past_key_values=compressed_kv,
+                position_ids=position_ids,
                 use_cache=False,
                 return_dict=True,
             )
