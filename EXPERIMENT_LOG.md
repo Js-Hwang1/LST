@@ -542,3 +542,260 @@ kv_norm_loss = (k_cg_norm_mean - k_dense_norm_mean).pow(2) + \
 - `kv_norm/k_cg`, `kv_norm/k_dense`: Track K scale ratio
 - `kv_norm/v_cg`, `kv_norm/v_dense`: Track V scale ratio
 - `loss/kv_norm`: Track norm matching loss component
+
+---
+
+# Experiment v3: Cosine-Magnitude Decomposition (FAILED)
+
+**Date:** 2024-12-06
+**Run ID:** fmkv_v3_manifold/qy4lx4uy
+**Hardware:** Google Colab A100 40GB
+**WandB:** https://wandb.ai/hwang30916-stony-brook-university/fmkv_v3_manifold/runs/qy4lx4uy
+
+---
+
+## 1. Changes from v2
+
+### 1.1 v3 Loss Function Design
+
+Based on reasoning agent's recommendation, v3 decomposed force matching into:
+
+**Cosine Direction Matching:**
+```
+L_dir = 1 - cos(J_dense, J_cg)
+```
+Goal: Match the steering direction independent of magnitude.
+
+**Log Magnitude Matching:**
+```
+L_mag = |log(||J_dense||) - log(||J_cg||)|
+```
+Goal: Match intensity on log scale to handle wide dynamic range.
+
+**Ratio-based Manifold Regularization:**
+```
+L_manifold = (||K_cg||/||K_dense|| - 1)^2 + (||V_cg||/||V_dense|| - 1)^2
+```
+Goal: Enforce K_cg and V_cg norms match dense norms exactly.
+
+### 1.2 v3 Loss Weights
+```python
+consistency_weight:      1.0
+force_direction_weight:  5.0   # L_dir = 1 - cos(J_dense, J_cg)
+force_magnitude_weight:  1.0   # L_mag = |log norm diff|
+manifold_weight:         2.0   # Ratio-based
+# Legacy (disabled)
+force_matching_weight:   0.0
+kv_norm_weight:          0.0
+```
+
+### 1.3 Hyperparameters
+- batch_size: 256
+- learning_rate: 5e-5
+- max_steps: 2200
+- num_windows_per_sample: 4
+
+---
+
+## 2. v3 Training Results
+
+### 2.1 Final Metrics
+```
+train/loss/total:            64000
+eval/loss:                   33322.67
+train/jacobian/ratio:        105.5    # WORSE than v2's 24.25!
+train/jacobian/cg_norm:      326      # EXPLODED (v2 was 49.75)
+train/jacobian/dense_norm:   5.81
+train/jacobian/cosine_sim:   -0.0016  # ORTHOGONAL! (should be ~1.0)
+train/kv_norm/k_cg:          54.5     # v2 was 30.6
+train/kv_norm/k_dense:       19.125
+train/kv_norm/v_cg:          30.625   # v2 was 10.06
+train/kv_norm/v_dense:       1.88
+train/manifold/k_ratio:      3.42     # Should be 1.0
+train/manifold/v_ratio:      38.75    # Should be 1.0 - MASSIVELY OFF!
+train/loss/force_direction:  1.0      # cos=0, completely orthogonal
+```
+
+### 2.2 v1 vs v2 vs v3 Comparison
+
+| Metric | v1 | v2 | v3 | Trend |
+|--------|----|----|-----|-------|
+| jacobian/ratio | 0.02 | 24.25 | 105.5 | 📈 WORSE |
+| jacobian/cg_norm | 0.14 | 49.75 | 326 | 📈 WORSE |
+| jacobian/cosine_sim | N/A | N/A | -0.0016 | ❌ ORTHOGONAL |
+| kv_norm/k_cg | 0.01 | 30.6 | 54.5 | 📈 WORSE |
+| kv_norm/v_cg | 0.03 | 10.06 | 30.6 | 📈 WORSE |
+| manifold/k_ratio | N/A | N/A | 3.42 | ❌ FAILED |
+| manifold/v_ratio | N/A | N/A | 38.75 | ❌ FAILED |
+| eval/loss | 12.1 | 2063.7 | 33322.7 | 📈 WORSE |
+
+---
+
+## 3. v3 Failure Analysis
+
+### 3.1 Critical Finding: Jacobians are Orthogonal
+
+The most alarming result is `cosine_sim = -0.0016`:
+- The compressed attention Jacobian is **completely orthogonal** to the dense Jacobian
+- The sidecar is producing gradients that steer in a **random direction**
+- This is worse than random - it's essentially noise
+
+### 3.2 Why Cosine-Magnitude Decomposition Failed
+
+**Problem 1: Gradient Conflict**
+
+The cosine direction loss `L_dir = 1 - cos(J_dense, J_cg)` has gradient:
+```
+d(L_dir)/d(J_cg) = -J_dense / (||J_dense|| * ||J_cg||) + cos * J_cg / ||J_cg||^2
+```
+
+This pushes J_cg toward J_dense's direction. But the magnitude loss pushes J_cg's norm toward ||J_dense||.
+
+When K_cg and V_cg are scaled up (by anti-collapse or other losses), the Jacobian magnitude increases but the direction drifts because the attention pattern changes with scale.
+
+**Problem 2: Manifold Weight Too Weak**
+
+The manifold_weight=2.0 was dominated by:
+- `anti_collapse`: 41728
+- `kv_match`: 7584
+- `manifold`: 7136
+
+The anti-collapse penalty (which prevents K_cg from being small) is 6x larger than manifold regularization!
+
+**Problem 3: Log Magnitude is Unstable**
+
+`L_mag = |log(||J_dense||) - log(||J_cg||)|` has issues:
+- When ||J_cg|| >> ||J_dense||, the gradient is small (1/||J_cg||)
+- This provides weak corrective signal when the scale is already exploded
+
+### 3.3 Why Ratio-Based Manifold Failed
+
+The manifold loss `(||K_cg||/||K_dense|| - 1)^2` has:
+- `k_ratio = 54.5 / 19.125 = 2.85` (logged as 3.42?)
+- `v_ratio = 30.6 / 1.88 = 16.3` (logged as 38.75?)
+
+The loss is `(2.85-1)^2 + (16.3-1)^2 = 3.4 + 234 = 237.4`, but logged as 7136.
+
+The weight=2.0 gives 2 * 237 = 474, but this is tiny compared to anti_collapse=41728.
+
+---
+
+## 4. Root Cause Diagnosis
+
+### 4.1 The Anti-Collapse Penalty is Too Strong
+
+Looking at the loss breakdown:
+```
+anti_collapse:     41728  (65% of total)
+kv_match:          7584   (12%)
+manifold:          7136   (11%)
+consistency:       11.6   (0.02%)
+force_direction:   1.0    (cosine loss, not used effectively)
+force_magnitude:   4.2    (tiny)
+```
+
+The anti-collapse penalty dominates everything. It's designed to prevent K_cg from collapsing to zero, but it's pushing K_cg to be **much larger** than necessary.
+
+### 4.2 Direction Matching Has No Teeth
+
+`force_direction_weight = 5.0` gives `5 * 1.0 = 5.0` contribution.
+This is 0.008% of the total loss - completely ignored!
+
+The direction loss of 1.0 means `cos(J_dense, J_cg) = 0` - completely orthogonal.
+But the optimizer doesn't care because other losses are 10000x larger.
+
+### 4.3 The Fundamental Problem: Loss Scale Mismatch
+
+The consistency loss uses MSE between attention outputs:
+- When norms are ~50, MSE can be ~2500
+- When norms explode to 326, the Jacobian squared errors are ~100,000
+
+The force matching losses were designed when norms were reasonable, but now they're dominated by the explosion dynamics.
+
+---
+
+## 5. Proposed Fixes for v4
+
+### 5.1 Fix 1: Disable Anti-Collapse or Rebalance
+
+The anti-collapse penalty was added to prevent v1's collapse. But v2 and v3 show the opposite problem - explosion.
+
+**Option A:** Disable anti-collapse entirely
+```python
+anti_collapse_weight = 0.0
+```
+
+**Option B:** Make it symmetric (penalize both collapse AND explosion)
+```python
+L_anti = (||K_cg|| - ||K_dense||).abs().pow(2)  # Symmetric
+```
+
+### 5.2 Fix 2: Hard Normalization in Architecture
+
+Instead of soft regularization, enforce scale matching architecturally:
+```python
+def compress_cache(self, keys, values):
+    k_cg, v_cg = self.encoder(keys, values)
+
+    # Hard normalize to match input norms
+    k_cg = k_cg * (keys.norm(dim=-1, keepdim=True).mean() / k_cg.norm(dim=-1, keepdim=True))
+    v_cg = v_cg * (values.norm(dim=-1, keepdim=True).mean() / v_cg.norm(dim=-1, keepdim=True))
+
+    return k_cg, v_cg
+```
+
+This guarantees `||K_cg|| = ||K_dense||` by construction.
+
+### 5.3 Fix 3: Normalize Jacobians Before Comparison
+
+```python
+J_dense_normed = J_dense / (||J_dense|| + eps)
+J_cg_normed = J_cg / (||J_cg|| + eps)
+L_direction = ||J_dense_normed - J_cg_normed||^2
+```
+
+This focuses purely on direction matching without scale interference.
+
+### 5.4 Fix 4: Gradient Penalty on K/V Norms
+
+Instead of loss-based regularization, clip gradients that would increase K/V norms:
+```python
+if k_cg.norm() > k_dense.norm() * 1.5:
+    k_cg.register_hook(lambda grad: grad * 0.1)  # Dampen growth
+```
+
+### 5.5 Priority Order for v4
+
+1. **Hard normalization** - Architectural fix that guarantees norm matching
+2. **Disable anti-collapse** - Remove the main driver of explosion
+3. **Normalize Jacobians** - Compare directions only
+4. **Rebalance loss weights** - Make manifold competitive with other losses
+
+---
+
+## 6. Key Insights from v3
+
+1. **Cosine-magnitude decomposition doesn't work** when other losses dominate. The direction loss contributed 0.008% of total loss.
+
+2. **Anti-collapse penalty is the enemy** - It's 65% of total loss and drives explosion.
+
+3. **Soft regularization fails** when loss scales are mismatched by 10000x.
+
+4. **Architectural constraints beat loss functions** - Hard normalization would have prevented both collapse and explosion.
+
+5. **The optimizer follows the gradient** - If manifold loss is 2000x smaller than anti-collapse, it's ignored.
+
+6. **v1→v2→v3 progression: collapse→explosion→worse explosion** - We're oscillating around the optimum without finding it.
+
+---
+
+## 7. Summary
+
+| Version | Problem | Jacobian Ratio | K_cg Norm | V_cg Norm |
+|---------|---------|----------------|-----------|-----------|
+| v1 | Collapse | 0.02 | 0.01 | 0.03 |
+| v2 | Explosion | 24.25 | 30.6 | 10.06 |
+| v3 | Worse Explosion + Orthogonal | 105.5 | 54.5 | 30.6 |
+| v4 (target) | Balanced | ~1.0 | ~19.1 | ~1.9 |
+
+**Next step:** Implement hard normalization in the Sidecar architecture to guarantee norm matching, then disable anti-collapse penalty.

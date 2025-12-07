@@ -38,56 +38,54 @@ from fmkv.losses.jacobian import (
 class ForceMatchingLossConfig:
     """Configuration for Force Matching Loss.
 
-    v3 Protocol: Cosine-Magnitude Decomposition
-    ============================================
+    v4 Protocol: Hard Manifold Projection
+    ======================================
 
-    The v2 experiment showed that raw MSE force matching causes scale explosion
-    (jacobian ratio = 24.25 instead of ~1.0). The v3 fix decouples:
+    v1: force=0.0 (disabled) -> Jacobian collapse (ratio=0.02)
+    v2: force=10.0, norm=0.1 -> Scale explosion (ratio=24.25)
+    v3: direction=5.0, magnitude=1.0, manifold=2.0 -> WORSE explosion (ratio=105.5)
+        Problem: anti_collapse penalty dominated loss (65%), driving explosion
 
-    1. Direction matching (steering): L_dir = 1 - cos(J_dense, J_cg)
-    2. Magnitude matching (intensity): L_mag = |log(||J_dense||) - log(||J_cg||)|
-    3. Manifold constraint: L_manifold = (||K_cg||/mu_K - 1)^2 + (||V_cg||/mu_V - 1)^2
+    v4 Fix: ARCHITECTURAL enforcement of manifold constraint
+    - Hard projection layer in Sidecar: ||K_cg|| = R_K, ||V_cg|| = R_V
+    - Remove ALL regularization losses (manifold, anti_collapse, magnitude, etc.)
+    - Keep ONLY: L_force_cos + lambda * L_consistency
+
+    Loss function:
+        L_v4 = L_force_cos + lambda * L_consistency
+        where L_force_cos = 1 - cos(J_dense, J_cg)
     """
 
     # Number of future queries to sample for force matching
     num_future_queries: int = 16
 
-    # === v3 Loss Weights (Cosine-Magnitude Decomposition) ===
+    # === v4 Loss Weights (Hard Manifold Projection) ===
     #
-    # v1: force=0.0 (disabled) -> Jacobian collapse (ratio=0.02)
-    # v2: force=10.0, norm=0.1 -> Scale explosion (ratio=24.25)
-    # v3: direction=5.0, magnitude=1.0, manifold=2.0 -> Equilibrium (ratio~1.0)
+    # Only TWO non-zero weights:
+    # 1. force_direction_weight: Match Jacobian direction (steering)
+    # 2. consistency_weight: Match attention output (validation)
 
-    # λ1: Consistency (output MSE) - base requirement
+    # lambda_1: Consistency (output MSE) - ensures compressed output matches dense
     consistency_weight: float = 1.0
 
-    # λ2: Force DIRECTION matching (cosine similarity) - PRIMARY steering objective
+    # lambda_2: Force DIRECTION matching (cosine similarity) - PRIMARY objective
     # L_dir = 1 - cos(J_dense, J_cg)
-    force_direction_weight: float = 5.0
+    force_direction_weight: float = 1.0
 
-    # λ3: Force MAGNITUDE matching (log-space) - prevents both collapse and explosion
-    # L_mag = |log(||J_dense||) - log(||J_cg||)|
-    force_magnitude_weight: float = 1.0
+    # === ALL OTHER WEIGHTS SET TO 0.0 (v4 uses hard projection instead) ===
 
-    # λ4: Strict Manifold Regularization - bidirectional constraint on KV norms
-    # L_manifold = (||K_cg||/mu_K - 1)^2 + (||V_cg||/mu_V - 1)^2
-    # This is RATIO-based (not difference-based) to prevent both collapse AND explosion
-    manifold_weight: float = 2.0
+    # v3 weights - DISABLED (now handled by hard projection)
+    force_magnitude_weight: float = 0.0  # Hard projection ensures ||K_cg|| = R_K
+    manifold_weight: float = 0.0  # Hard projection ensures manifold constraint
+    output_magnitude_weight: float = 0.0  # Not needed with hard projection
+    kv_match_weight: float = 0.0  # Not needed - we match Jacobians directly
+    diversity_weight: float = 0.0  # Let network learn diversity naturally
 
-    # Output magnitude matching (secondary)
-    output_magnitude_weight: float = 0.5
-
-    # Direct KV matching - anchor super-tokens to window means
-    kv_match_weight: float = 1.0
-
-    # Diversity loss - prevent window collapse
-    diversity_weight: float = 0.5
-
-    # Legacy v2 weights (kept for compatibility, set to 0 for v3)
-    force_matching_weight: float = 0.0  # v3: Replaced by direction + magnitude
-    kv_norm_weight: float = 0.0  # v3: Replaced by manifold_weight
-    jacobian_norm_weight: float = 0.0  # v3: Replaced by force_magnitude_weight
-    min_jacobian_ratio: float = 0.1  # Still used as floor
+    # Legacy v2 weights - DISABLED
+    force_matching_weight: float = 0.0
+    kv_norm_weight: float = 0.0
+    jacobian_norm_weight: float = 0.0  # No anti-collapse needed with hard projection
+    min_jacobian_ratio: float = 0.1  # Not used in v4
 
     # Normalization
     normalize_jacobian: bool = True

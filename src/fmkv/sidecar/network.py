@@ -203,6 +203,14 @@ class Sidecar(nn.Module):
         """
         Convenience method to compress separate K and V tensors.
 
+        v4 Protocol: Hard Manifold Projection
+        =====================================
+        Architecturally enforces ||K_cg|| = R_K and ||V_cg|| = R_V where:
+        - R_K = mean(||k_i||) over the input window
+        - R_V = mean(||v_i||) over the input window
+
+        This prevents both collapse (v1) and explosion (v2, v3) by design.
+
         Args:
             keys: Key tensor of shape (batch, window_size, d_head)
             values: Value tensor of shape (batch, window_size, d_head)
@@ -213,8 +221,20 @@ class Sidecar(nn.Module):
         """
         # Concatenate K and V
         kv_window = torch.cat([keys, values], dim=-1)
-        
-        return self.forward(kv_window, attention_mask, return_split=True)
+
+        # Get raw outputs from network
+        k_raw, v_raw = self.forward(kv_window, attention_mask, return_split=True)
+
+        # v4: Hard Manifold Projection
+        # Compute target norms from input window (average over tokens)
+        R_K = keys.norm(dim=-1).mean(dim=-1, keepdim=True)  # (batch, 1)
+        R_V = values.norm(dim=-1).mean(dim=-1, keepdim=True)  # (batch, 1)
+
+        # Normalize raw outputs and rescale to match input manifold
+        k_cg = R_K * (k_raw / (k_raw.norm(dim=-1, keepdim=True) + 1e-8))
+        v_cg = R_V * (v_raw / (v_raw.norm(dim=-1, keepdim=True) + 1e-8))
+
+        return k_cg, v_cg
     
     @torch.no_grad()
     def compress_cache_batched(
