@@ -33,10 +33,12 @@ def collect_samples(
     dataset_name: str = "wikitext",
     dataset_config: str = "wikitext-103-v1",
     seed: int = 42,
-    min_length: int = 100,
+    min_length: int = 50,
 ) -> list[torch.Tensor]:
     """
     Collect and tokenize samples from WikiText.
+
+    Concatenates multiple texts to reach target length (standard LLM practice).
 
     Args:
         tokenizer: HuggingFace tokenizer
@@ -46,7 +48,7 @@ def collect_samples(
         dataset_name: HuggingFace dataset name
         dataset_config: Dataset configuration
         seed: Random seed
-        min_length: Minimum text length in characters
+        min_length: Minimum text length in characters (to filter empty entries)
 
     Returns:
         List of tokenized samples (each is a tensor of shape (max_length,))
@@ -57,43 +59,50 @@ def collect_samples(
     dataset = load_dataset(dataset_name, dataset_config, split=split)
     dataset = dataset.shuffle(seed=seed)
 
-    samples = []
-    pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id or 0
+    # Concatenate all texts into one large corpus
+    logger.info("Building text corpus...")
+    all_text = []
+    for item in tqdm(dataset, desc="Building corpus"):
+        text = item.get("text", "").strip()
+        if len(text) >= min_length:
+            all_text.append(text)
 
-    logger.info(f"Tokenizing and filtering for samples close to {max_length} tokens...")
-    for item in tqdm(dataset, desc=f"Collecting {split}", total=len(dataset)):
-        text = item.get("text", "")
-        if len(text.strip()) < min_length:
-            continue
+    corpus = " ".join(all_text)
+    logger.info(f"Corpus size: {len(corpus):,} characters")
 
-        # Tokenize without padding to check actual length
-        tokens = tokenizer(
-            text,
-            truncation=True,
-            max_length=max_length,
-            return_tensors="pt",
+    # Tokenize entire corpus
+    logger.info("Tokenizing corpus...")
+    all_tokens = tokenizer(corpus, return_tensors="pt")["input_ids"].squeeze(0)
+    total_tokens = len(all_tokens)
+    logger.info(f"Total tokens: {total_tokens:,}")
+
+    # Check if we have enough tokens
+    num_possible = total_tokens // max_length
+    if num_possible < num_samples:
+        logger.warning(
+            f"Only {num_possible} samples possible with {total_tokens} tokens "
+            f"at max_length={max_length}. Requested {num_samples}."
         )
 
-        actual_length = tokens["input_ids"].shape[1]
+    # Extract non-overlapping chunks of max_length
+    actual_samples = min(num_samples, num_possible)
+    samples = []
 
-        # Only keep samples close to max_length (within 10 tokens)
-        if actual_length >= max_length - 10:
-            # Pad to exact max_length
-            if actual_length < max_length:
-                pad_length = max_length - actual_length
-                padding = torch.full((1, pad_length), pad_token_id, dtype=tokens["input_ids"].dtype)
-                tokens["input_ids"] = torch.cat([tokens["input_ids"], padding], dim=1)
-            samples.append(tokens["input_ids"].squeeze(0))
-
-        if len(samples) >= num_samples:
-            break
+    logger.info(f"Extracting {actual_samples} samples of {max_length} tokens...")
+    for i in tqdm(range(actual_samples), desc=f"Collecting {split}"):
+        start = i * max_length
+        end = start + max_length
+        chunk = all_tokens[start:end]
+        samples.append(chunk)
 
     logger.info(f"Collected {len(samples)} samples")
     return samples
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Collect and cache tokenized data for LST training")
+    parser = argparse.ArgumentParser(
+        description="Collect and cache tokenized data for LST training"
+    )
 
     parser.add_argument(
         "--model_name",
@@ -101,9 +110,13 @@ def main():
         default="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         help="Model name (for tokenizer)",
     )
-    parser.add_argument("--output", type=str, default="data/wikitext_512.pt", help="Output file path")
+    parser.add_argument(
+        "--output", type=str, default="data/wikitext_512.pt", help="Output file path"
+    )
     parser.add_argument("--max_length", type=int, default=512, help="Max sequence length")
-    parser.add_argument("--train_samples", type=int, default=10000, help="Number of training samples")
+    parser.add_argument(
+        "--train_samples", type=int, default=10000, help="Number of training samples"
+    )
     parser.add_argument("--val_samples", type=int, default=500, help="Number of validation samples")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
@@ -116,6 +129,7 @@ def main():
     # Load tokenizer
     logger.info(f"Loading tokenizer: {args.model_name}")
     from transformers import AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token

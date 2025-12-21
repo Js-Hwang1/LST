@@ -17,6 +17,7 @@ from torch import Tensor
 
 try:
     from transformers.cache_utils import DynamicCache
+
     HAS_DYNAMIC_CACHE = True
 except ImportError:
     HAS_DYNAMIC_CACHE = False
@@ -29,7 +30,7 @@ def convert_to_cache(past_key_values):
     if past_key_values is None:
         return None
     # If already a Cache object, return as-is
-    if hasattr(past_key_values, 'get_seq_length'):
+    if hasattr(past_key_values, "get_seq_length"):
         return past_key_values
     # Convert from legacy tuple format
     return DynamicCache.from_legacy_cache(past_key_values)

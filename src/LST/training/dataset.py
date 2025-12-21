@@ -86,7 +86,9 @@ class TextDataset(Dataset):
                 if actual_length < max_length:
                     pad_length = max_length - actual_length
                     pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id or 0
-                    padding = torch.full((1, pad_length), pad_token_id, dtype=tokens["input_ids"].dtype)
+                    padding = torch.full(
+                        (1, pad_length), pad_token_id, dtype=tokens["input_ids"].dtype
+                    )
                     tokens["input_ids"] = torch.cat([tokens["input_ids"], padding], dim=1)
                 self.samples.append(tokens["input_ids"].squeeze(0))
 
