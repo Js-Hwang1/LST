@@ -93,6 +93,10 @@ def load_sidecar(checkpoint_path: str, device: torch.device) -> SidecarPPL:
     sidecar.load_state_dict(ckpt["model_state_dict"])
     sidecar.eval()
 
+    # Match model dtype (bfloat16 on CUDA)
+    if torch.cuda.is_available():
+        sidecar = sidecar.to(torch.bfloat16)
+
     return sidecar
 
 
