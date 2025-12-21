@@ -355,18 +355,3 @@ tests/
 
 ---
 
-## Development
-
-See [CLAUDE.md](CLAUDE.md) for engineering standards and [STATUS.md](STATUS.md) for current progress.
-
-```bash
-# Run tests
-pytest tests/ -v
-
-# Format code
-black src/ scripts/ tests/
-ruff check src/ scripts/ tests/ --fix
-
-# Type checking
-mypy src/
-```
