@@ -51,7 +51,7 @@ We compare LST against 7 state-of-the-art KV cache compression methods:
 | Method | Compression | TinyLlama-1.1B | Llama-2-7B | Llama-3-8B | Llama-3-70B |
 |--------|-------------|----------------|------------|------------|-------------|
 | Dense (No Compression) | 1:1 | **11.22** | -- | -- | -- |
-| **LST (Ours)** | 8:1 | *pending* | -- | -- | -- |
+| **LST (Ours)** | 8:1 | 21.25 | -- | -- | -- |
 | KVMerger | 8:1 | 24.13 | -- | -- | -- |
 | Mean Pooling | 8:1 | 24.80 | -- | -- | -- |
 | StreamingLLM | 8:1 | 25.50 | -- | -- | -- |
