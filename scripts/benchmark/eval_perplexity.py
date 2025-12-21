@@ -289,10 +289,12 @@ def evaluate_ppl(
             past_kv = outputs.past_key_values
 
             # Convert DynamicCache to list of tuples if needed
-            if hasattr(past_kv, 'key_cache'):
+            if hasattr(past_kv, "key_cache"):
                 # DynamicCache format
-                cache = [(past_kv.key_cache[i], past_kv.value_cache[i])
-                         for i in range(len(past_kv.key_cache))]
+                cache = [
+                    (past_kv.key_cache[i], past_kv.value_cache[i])
+                    for i in range(len(past_kv.key_cache))
+                ]
             else:
                 # Already tuple format
                 cache = list(past_kv)

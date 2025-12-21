@@ -302,8 +302,12 @@ class KVMerger(CompressionMethod):
             # Trim from middle (keep sink and recent)
             keep_end = budget - num_recent if num_recent > 0 else budget
             if num_recent > 0:
-                keys_out = torch.cat([keys_out[:, :keep_end, :], keys_out[:, -num_recent:, :]], dim=1)
-                values_out = torch.cat([values_out[:, :keep_end, :], values_out[:, -num_recent:, :]], dim=1)
+                keys_out = torch.cat(
+                    [keys_out[:, :keep_end, :], keys_out[:, -num_recent:, :]], dim=1
+                )
+                values_out = torch.cat(
+                    [values_out[:, :keep_end, :], values_out[:, -num_recent:, :]], dim=1
+                )
             else:
                 keys_out = keys_out[:, :budget, :]
                 values_out = values_out[:, :budget, :]
