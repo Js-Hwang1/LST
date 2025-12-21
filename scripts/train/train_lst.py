@@ -116,6 +116,12 @@ def main():
     parser.add_argument("--max_length", type=int, default=512, help="Max sequence length")
     parser.add_argument("--train_samples", type=int, default=5000, help="Training samples")
     parser.add_argument("--val_samples", type=int, default=100, help="Validation samples")
+    parser.add_argument(
+        "--cached_data",
+        type=str,
+        default=None,
+        help="Path to pre-tokenized .pt file (skips tokenization)",
+    )
 
     # Checkpointing
     parser.add_argument(
@@ -141,25 +147,27 @@ def main():
     # Load model
     model, tokenizer, d_head = load_model(args.model_name, device)
 
-    # Create sidecar
+    # Create sidecar (match model dtype for CUDA)
+    model_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
     sidecar = SidecarPPL(
         d_head=d_head,
         window_size=args.window_size,
         hidden_dim=args.hidden_dim,
         num_encoder_layers=args.num_encoder_layers,
-    ).to(device)
+    ).to(device=device, dtype=model_dtype)
 
     num_params = sum(p.numel() for p in sidecar.parameters())
     logger.info(f"Sidecar parameters: {num_params:,}")
 
     # Create dataloaders
     train_loader, val_loader = create_dataloaders(
-        tokenizer,
+        tokenizer=tokenizer,
         batch_size=args.batch_size,
         max_length=args.max_length,
         train_samples=args.train_samples,
         val_samples=args.val_samples,
         seed=args.seed,
+        cached_path=args.cached_data,
     )
 
     # Create trainer config

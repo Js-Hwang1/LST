@@ -317,20 +317,10 @@ class TestBaselines:
 
     def test_all_baselines_no_crash_on_short_seq(self):
         """Test that all baselines handle short sequences gracefully."""
-        from src.baselines import (
-            H2O,
-            TOVA,
-            CaM,
-            CaMConfig,
-            H2OConfig,
-            KVMerger,
-            KVMergerConfig,
-            StreamingLLM,
-            StreamingLLMConfig,
-            TOVAConfig,
-            WeightedKV,
-            WeightedKVConfig,
-        )
+        from src.baselines import (H2O, TOVA, CaM, CaMConfig, H2OConfig,
+                                   KVMerger, KVMergerConfig, StreamingLLM,
+                                   StreamingLLMConfig, TOVAConfig, WeightedKV,
+                                   WeightedKVConfig)
 
         batch_size = 2
         seq_len = 8  # Very short

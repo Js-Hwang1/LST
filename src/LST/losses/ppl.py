@@ -15,6 +15,25 @@ cache actually works for language modeling.
 import torch.nn as nn
 from torch import Tensor
 
+try:
+    from transformers.cache_utils import DynamicCache
+    HAS_DYNAMIC_CACHE = True
+except ImportError:
+    HAS_DYNAMIC_CACHE = False
+
+
+def convert_to_cache(past_key_values):
+    """Convert tuple of (K, V) to DynamicCache for newer transformers."""
+    if not HAS_DYNAMIC_CACHE:
+        return past_key_values
+    if past_key_values is None:
+        return None
+    # If already a Cache object, return as-is
+    if hasattr(past_key_values, 'get_seq_length'):
+        return past_key_values
+    # Convert from legacy tuple format
+    return DynamicCache.from_legacy_cache(past_key_values)
+
 
 class PPLLoss(nn.Module):
     """
@@ -52,9 +71,12 @@ class PPLLoss(nn.Module):
         if self.ignore_first_token:
             labels[:, 0] = -100  # Ignore first token
 
+        # Convert to Cache object for newer transformers versions
+        cache = convert_to_cache(compressed_cache)
+
         outputs = model(
             suffix_ids,
-            past_key_values=compressed_cache,
+            past_key_values=cache,
             labels=labels,
         )
 
@@ -77,9 +99,12 @@ class PPLLoss(nn.Module):
         if self.ignore_first_token:
             labels[:, 0] = -100
 
+        # Convert to Cache object for newer transformers versions
+        cache = convert_to_cache(compressed_cache)
+
         outputs = model(
             suffix_ids,
-            past_key_values=compressed_cache,
+            past_key_values=cache,
             labels=labels,
         )
 
