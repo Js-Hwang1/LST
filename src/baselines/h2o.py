@@ -20,12 +20,12 @@ It evicts tokens entirely, losing their information permanently.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Any
+from typing import Any
 
 import torch
 from torch import Tensor
 
-from .base import CompressionMethod, CompressionConfig, gather_indices
+from .base import CompressionConfig, CompressionMethod, gather_indices
 
 
 @dataclass
@@ -68,7 +68,7 @@ class H2O(CompressionMethod):
     def compute_importance(
         self,
         keys: Tensor,
-        attention_scores: Optional[Tensor] = None,
+        attention_scores: Tensor | None = None,
     ) -> Tensor:
         """
         Compute importance scores for each token position.
@@ -106,9 +106,9 @@ class H2O(CompressionMethod):
         self,
         keys: Tensor,
         values: Tensor,
-        attention_scores: Optional[Tensor] = None,
+        attention_scores: Tensor | None = None,
         **kwargs: Any,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Compress KV cache using H2O heavy-hitter selection.
 
@@ -127,7 +127,6 @@ class H2O(CompressionMethod):
             batch_size, n_heads, seq_len, d_head = keys.shape
         else:
             batch_size, seq_len, d_head = keys.shape
-            n_heads = 1
 
         num_sink = self.config.num_sink
         num_recent = self.config.num_recent
@@ -177,8 +176,14 @@ class H2O(CompressionMethod):
         middle_indices, _ = middle_indices.sort(dim=-1)  # Preserve order
 
         # Build complete index set
-        sink_indices = torch.arange(num_sink, device=keys.device).unsqueeze(0).expand(batch_size, -1)
-        recent_indices = torch.arange(seq_len - num_recent, seq_len, device=keys.device).unsqueeze(0).expand(batch_size, -1)
+        sink_indices = (
+            torch.arange(num_sink, device=keys.device).unsqueeze(0).expand(batch_size, -1)
+        )
+        recent_indices = (
+            torch.arange(seq_len - num_recent, seq_len, device=keys.device)
+            .unsqueeze(0)
+            .expand(batch_size, -1)
+        )
         all_indices = torch.cat([sink_indices, middle_indices, recent_indices], dim=-1)
         all_indices, _ = all_indices.sort(dim=-1)  # Final sort for causal order
 
@@ -193,10 +198,10 @@ def h2o_evict(
     keys: Tensor,
     values: Tensor,
     budget: int,
-    importance: Optional[Tensor] = None,
+    importance: Tensor | None = None,
     num_sink: int = 4,
     num_recent: int = 8,
-) -> Tuple[Tensor, Tensor]:
+) -> tuple[Tensor, Tensor]:
     """
     Standalone H2O eviction function for testing and integration.
 

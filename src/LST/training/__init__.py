@@ -10,8 +10,8 @@ Components:
     - TrainingConfig: Configuration dataclass
 """
 
-from .trainer import LSTTrainer
 from .dataset import TextDataset, create_dataloaders
+from .trainer import LSTTrainer
 
 __all__ = [
     "LSTTrainer",

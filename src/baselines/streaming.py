@@ -25,12 +25,12 @@ into super-tokens that retain aggregate information.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Any
+from typing import Any
 
 import torch
 from torch import Tensor
 
-from .base import CompressionMethod, CompressionConfig
+from .base import CompressionConfig, CompressionMethod
 
 
 @dataclass
@@ -69,9 +69,9 @@ class StreamingLLM(CompressionMethod):
         self,
         keys: Tensor,
         values: Tensor,
-        attention_scores: Optional[Tensor] = None,
+        attention_scores: Tensor | None = None,
         **kwargs: Any,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Apply StreamingLLM eviction: keep sink + recent, evict middle.
 
@@ -125,7 +125,7 @@ def streaming_evict(
     values: Tensor,
     num_sink: int = 4,
     num_recent: int = 256,
-) -> Tuple[Tensor, Tensor]:
+) -> tuple[Tensor, Tensor]:
     """
     Standalone StreamingLLM eviction function for testing and integration.
 

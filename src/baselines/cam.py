@@ -18,13 +18,13 @@ Algorithm:
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Any
+from typing import Any
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from .base import CompressionMethod, CompressionConfig
+from .base import CompressionConfig, CompressionMethod
 
 
 @dataclass
@@ -59,7 +59,7 @@ class CaM(CompressionMethod):
     def _compute_importance(
         self,
         keys: Tensor,
-        attention_scores: Optional[Tensor] = None,
+        attention_scores: Tensor | None = None,
     ) -> Tensor:
         """Compute importance scores for token selection."""
         if attention_scores is not None and attention_scores.dim() == 2:
@@ -135,9 +135,9 @@ class CaM(CompressionMethod):
         self,
         keys: Tensor,
         values: Tensor,
-        attention_scores: Optional[Tensor] = None,
+        attention_scores: Tensor | None = None,
         **kwargs: Any,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Compress KV cache using CaM algorithm.
 
@@ -206,7 +206,9 @@ class CaM(CompressionMethod):
         keys_padded = []
         for k in keys_out:
             if k.shape[0] < max_len:
-                pad = torch.zeros(max_len - k.shape[0], k.shape[-1], device=keys.device, dtype=k.dtype)
+                pad = torch.zeros(
+                    max_len - k.shape[0], k.shape[-1], device=keys.device, dtype=k.dtype
+                )
                 k = torch.cat([k, pad], dim=0)
             keys_padded.append(k.unsqueeze(0))
         keys_out = torch.cat(keys_padded, dim=0)
@@ -228,7 +230,7 @@ def cam_compress(
     budget: int,
     num_sink: int = 4,
     num_recent: int = 8,
-) -> Tuple[Tensor, Tensor]:
+) -> tuple[Tensor, Tensor]:
     """Standalone CaM function for testing."""
     config = CaMConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
     method = CaM(config)

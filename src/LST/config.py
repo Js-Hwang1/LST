@@ -6,9 +6,9 @@ Configuration dataclasses for the LST compression system.
 Designed for reproducibility and easy hyperparameter tuning.
 """
 
-from dataclasses import dataclass, field
-from typing import Literal, Optional
+from dataclasses import dataclass
 from enum import Enum
+from typing import Literal
 
 
 class EncoderType(str, Enum):
@@ -178,8 +178,8 @@ class TrainingConfig:
 
     # Logging
     log_steps: int = 20
-    wandb_project: Optional[str] = None
-    wandb_run_name: Optional[str] = None
+    wandb_project: str | None = None
+    wandb_run_name: str | None = None
 
     # Seeds
     seed: int = 42

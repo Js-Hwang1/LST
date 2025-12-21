@@ -23,15 +23,14 @@ Training Strategy:
 """
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, List
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 
+from .diversity import DiversityLoss
 from .ppl import PPLLoss
 from .query_probing import QueryProbingLoss
-from .diversity import DiversityLoss
 
 
 @dataclass
@@ -66,7 +65,7 @@ class CombinedLoss(nn.Module):
 
     def __init__(
         self,
-        weights: Optional[LossWeights] = None,
+        weights: LossWeights | None = None,
         num_probes: int = 8,
         diversity_temperature: float = 0.1,
         warmup_steps: int = 0,
@@ -99,11 +98,11 @@ class CombinedLoss(nn.Module):
         self,
         model: nn.Module,
         suffix_ids: Tensor,
-        compressed_cache: Tuple[Tuple[Tensor, Tensor], ...],
-        dense_cache: Tuple[Tuple[Tensor, Tensor], ...],
-        super_tokens: Optional[Tensor] = None,
+        compressed_cache: tuple[tuple[Tensor, Tensor], ...],
+        dense_cache: tuple[tuple[Tensor, Tensor], ...],
+        super_tokens: Tensor | None = None,
         step: int = 0,
-    ) -> Tuple[Tensor, Dict[str, float]]:
+    ) -> tuple[Tensor, dict[str, float]]:
         """
         Compute combined loss.
 
@@ -145,8 +144,8 @@ class CombinedLoss(nn.Module):
 
     def _compute_qpaa_loss(
         self,
-        dense_cache: Tuple[Tuple[Tensor, Tensor], ...],
-        compressed_cache: Tuple[Tuple[Tensor, Tensor], ...],
+        dense_cache: tuple[tuple[Tensor, Tensor], ...],
+        compressed_cache: tuple[tuple[Tensor, Tensor], ...],
     ) -> Tensor:
         """Compute QPAA loss averaged across layers."""
         losses = []
@@ -168,11 +167,11 @@ class CombinedLoss(nn.Module):
 def combined_loss(
     model: nn.Module,
     suffix_ids: Tensor,
-    compressed_cache: Tuple[Tuple[Tensor, Tensor], ...],
-    dense_cache: Tuple[Tuple[Tensor, Tensor], ...],
-    super_tokens: Optional[Tensor] = None,
-    weights: Optional[LossWeights] = None,
-) -> Tuple[Tensor, Dict[str, float]]:
+    compressed_cache: tuple[tuple[Tensor, Tensor], ...],
+    dense_cache: tuple[tuple[Tensor, Tensor], ...],
+    super_tokens: Tensor | None = None,
+    weights: LossWeights | None = None,
+) -> tuple[Tensor, dict[str, float]]:
     """Functional interface to CombinedLoss."""
     loss_fn = CombinedLoss(weights=weights)
     return loss_fn(model, suffix_ids, compressed_cache, dense_cache, super_tokens)

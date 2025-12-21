@@ -18,13 +18,13 @@ Algorithm:
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, List, Any
+from typing import Any
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from .base import CompressionMethod, CompressionConfig
+from .base import CompressionConfig, CompressionMethod
 
 
 @dataclass
@@ -82,7 +82,7 @@ class KVMerger(CompressionMethod):
         self,
         similarity: Tensor,
         threshold: float,
-    ) -> List[List[Tuple[int, int]]]:
+    ) -> list[list[tuple[int, int]]]:
         """
         Identify contiguous regions where similarity exceeds threshold.
 
@@ -123,7 +123,7 @@ class KVMerger(CompressionMethod):
         values: Tensor,
         start: int,
         end: int,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Merge a set of tokens using Gaussian kernel weighting.
 
@@ -144,17 +144,17 @@ class KVMerger(CompressionMethod):
         set_len = end - start
         pivot_idx = set_len // 2  # Use center as pivot
 
-        k_pivot = k_set[:, pivot_idx:pivot_idx + 1, :]  # (batch, 1, d_head)
+        k_pivot = k_set[:, pivot_idx : pivot_idx + 1, :]  # (batch, 1, d_head)
 
         # Compute squared distances from pivot
         diff = k_set - k_pivot  # (batch, set_len, d_head)
-        sq_dist = (diff ** 2).sum(dim=-1)  # (batch, set_len)
+        sq_dist = (diff**2).sum(dim=-1)  # (batch, set_len)
 
         # Compute sigma as mean distance
         sigma = sq_dist.mean(dim=-1, keepdim=True).sqrt() + 1e-8  # (batch, 1)
 
         # Gaussian kernel weights
-        weights = torch.exp(-sq_dist / (2 * sigma ** 2 + 1e-8))  # (batch, set_len)
+        weights = torch.exp(-sq_dist / (2 * sigma**2 + 1e-8))  # (batch, set_len)
         weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-8)  # Normalize
 
         # Weighted merge
@@ -168,9 +168,9 @@ class KVMerger(CompressionMethod):
         self,
         keys: Tensor,
         values: Tensor,
-        attention_scores: Optional[Tensor] = None,
+        attention_scores: Tensor | None = None,
         **kwargs: Any,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Compress KV cache using KVMerger algorithm.
 
@@ -239,8 +239,8 @@ class KVMerger(CompressionMethod):
 
             if len(sets) == 0:
                 # No merging needed
-                k_compressed_list.append(k_middle[b:b+1])
-                v_compressed_list.append(v_middle[b:b+1])
+                k_compressed_list.append(k_middle[b : b + 1])
+                v_compressed_list.append(v_middle[b : b + 1])
                 continue
 
             # Build output by copying non-merged and inserting merged tokens
@@ -256,7 +256,7 @@ class KVMerger(CompressionMethod):
 
                 # Merge this set
                 k_merged, v_merged = self._gaussian_kernel_merge(
-                    k_middle[b:b+1], v_middle[b:b+1], start, end
+                    k_middle[b : b + 1], v_middle[b : b + 1], start, end
                 )
                 k_out.append(k_merged)
                 v_out.append(v_merged)
@@ -308,7 +308,7 @@ def kvmerger_compress(
     similarity_threshold: float = 0.75,
     num_sink: int = 4,
     num_recent: int = 8,
-) -> Tuple[Tensor, Tensor]:
+) -> tuple[Tensor, Tensor]:
     """Standalone KVMerger function for testing."""
     config = KVMergerConfig(
         num_sink=num_sink,

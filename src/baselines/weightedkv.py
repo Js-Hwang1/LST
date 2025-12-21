@@ -19,12 +19,12 @@ Algorithm:
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Any
+from typing import Any
 
 import torch
 from torch import Tensor
 
-from .base import CompressionMethod, CompressionConfig, gather_indices
+from .base import CompressionConfig, CompressionMethod
 
 
 @dataclass
@@ -60,7 +60,7 @@ class WeightedKV(CompressionMethod):
     def _compute_importance(
         self,
         keys: Tensor,
-        attention_scores: Optional[Tensor] = None,
+        attention_scores: Tensor | None = None,
     ) -> Tensor:
         """
         Compute importance scores for each token.
@@ -139,7 +139,9 @@ class WeightedKV(CompressionMethod):
                 w_neighbor = imp[neighbor]
                 total_w = w_evict + w_neighbor + 1e-8
 
-                v_out[neighbor] = (w_evict * values[b, idx] + w_neighbor * values[b, neighbor]) / total_w
+                v_out[neighbor] = (
+                    w_evict * values[b, idx] + w_neighbor * values[b, neighbor]
+                ) / total_w
 
             # Keep only non-evicted positions
             merged_values.append(v_out[keep_idx])
@@ -159,9 +161,9 @@ class WeightedKV(CompressionMethod):
         self,
         keys: Tensor,
         values: Tensor,
-        attention_scores: Optional[Tensor] = None,
+        attention_scores: Tensor | None = None,
         **kwargs: Any,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Compress KV cache using WeightedKV algorithm.
 
@@ -210,9 +212,6 @@ class WeightedKV(CompressionMethod):
         evict_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=keys.device)
         evict_mask.scatter_(1, evict_indices, True)
 
-        # Keep indices
-        keep_indices = (~evict_mask).nonzero(as_tuple=True)
-
         # Compress keys (simple eviction)
         keys_out = []
         for b in range(batch_size):
@@ -224,7 +223,9 @@ class WeightedKV(CompressionMethod):
         keys_padded = []
         for k in keys_out:
             if k.shape[0] < max_len:
-                pad = torch.zeros(max_len - k.shape[0], k.shape[-1], device=keys.device, dtype=k.dtype)
+                pad = torch.zeros(
+                    max_len - k.shape[0], k.shape[-1], device=keys.device, dtype=k.dtype
+                )
                 k = torch.cat([k, pad], dim=0)
             keys_padded.append(k.unsqueeze(0))
         keys_out = torch.cat(keys_padded, dim=0)
@@ -243,7 +244,9 @@ class WeightedKV(CompressionMethod):
             values_padded = []
             for v in values_out:
                 if v.shape[0] < max_len:
-                    pad = torch.zeros(max_len - v.shape[0], v.shape[-1], device=values.device, dtype=v.dtype)
+                    pad = torch.zeros(
+                        max_len - v.shape[0], v.shape[-1], device=values.device, dtype=v.dtype
+                    )
                     v = torch.cat([v, pad], dim=0)
                 values_padded.append(v.unsqueeze(0))
             values_out = torch.cat(values_padded, dim=0)
@@ -263,7 +266,7 @@ def weightedkv_compress(
     num_sink: int = 4,
     num_recent: int = 8,
     merge_values: bool = True,
-) -> Tuple[Tensor, Tensor]:
+) -> tuple[Tensor, Tensor]:
     """Standalone WeightedKV function for testing."""
     config = WeightedKVConfig(
         num_sink=num_sink,

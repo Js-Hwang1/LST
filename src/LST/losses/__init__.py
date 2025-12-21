@@ -14,10 +14,10 @@ Losses:
     - DiversityLoss: Contrastive loss to prevent super-token collapse
 """
 
+from .combined import CombinedLoss, LossWeights
+from .diversity import DiversityLoss
 from .ppl import PPLLoss
 from .query_probing import QueryProbingLoss
-from .diversity import DiversityLoss
-from .combined import CombinedLoss, LossWeights
 
 __all__ = [
     "PPLLoss",

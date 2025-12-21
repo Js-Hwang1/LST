@@ -12,9 +12,6 @@ This is the "downstream task" loss - it measures whether the compressed
 cache actually works for language modeling.
 """
 
-from typing import List, Tuple
-
-import torch
 import torch.nn as nn
 from torch import Tensor
 
@@ -37,7 +34,7 @@ class PPLLoss(nn.Module):
         self,
         model: nn.Module,
         suffix_ids: Tensor,
-        compressed_cache: Tuple[Tuple[Tensor, Tensor], ...],
+        compressed_cache: tuple[tuple[Tensor, Tensor], ...],
     ) -> Tensor:
         """
         Compute perplexity loss.
@@ -67,8 +64,8 @@ class PPLLoss(nn.Module):
         self,
         model: nn.Module,
         suffix_ids: Tensor,
-        compressed_cache: Tuple[Tuple[Tensor, Tensor], ...],
-    ) -> Tuple[Tensor, Tensor]:
+        compressed_cache: tuple[tuple[Tensor, Tensor], ...],
+    ) -> tuple[Tensor, Tensor]:
         """
         Compute loss and return logits for analysis.
 
@@ -92,7 +89,7 @@ class PPLLoss(nn.Module):
 def ppl_loss(
     model: nn.Module,
     suffix_ids: Tensor,
-    compressed_cache: Tuple[Tuple[Tensor, Tensor], ...],
+    compressed_cache: tuple[tuple[Tensor, Tensor], ...],
 ) -> Tensor:
     """Functional interface to PPLLoss."""
     loss_fn = PPLLoss()

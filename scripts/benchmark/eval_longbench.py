@@ -50,7 +50,6 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 import torch
@@ -59,19 +58,23 @@ from tqdm import tqdm
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.LST.sidecar import SidecarPPL
 from src.baselines import (
-    H2O, H2OConfig,
-    StreamingLLM, StreamingLLMConfig,
-    TOVA, TOVAConfig,
-    KVMerger, KVMergerConfig,
-    WeightedKV, WeightedKVConfig,
-    CaM, CaMConfig,
+    H2O,
+    TOVA,
+    CaM,
+    CaMConfig,
+    H2OConfig,
+    KVMerger,
+    KVMergerConfig,
+    StreamingLLM,
+    StreamingLLMConfig,
+    TOVAConfig,
+    WeightedKV,
+    WeightedKVConfig,
 )
+from src.LST.sidecar import SidecarPPL
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # Task configurations
@@ -139,7 +142,7 @@ def load_sidecar(checkpoint_path: str, device: torch.device) -> SidecarPPL:
     return sidecar
 
 
-def load_longbench_task(task_name: str, num_samples: Optional[int] = None) -> List[Dict]:
+def load_longbench_task(task_name: str, num_samples: int | None = None) -> list[dict]:
     """
     Load a LongBench task from HuggingFace datasets.
 
@@ -184,12 +187,12 @@ def load_longbench_task(task_name: str, num_samples: Optional[int] = None) -> Li
 
 
 def compress_cache_lst(
-    cache: List[Tuple[torch.Tensor, torch.Tensor]],
+    cache: list[tuple[torch.Tensor, torch.Tensor]],
     sidecar: SidecarPPL,
     window_size: int,
     num_sink: int,
     num_recent: int,
-) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
     """Compress cache using LST sidecar."""
     compressed = []
 
@@ -239,11 +242,11 @@ def compress_cache_lst(
 
 
 def compress_cache_mean(
-    cache: List[Tuple[torch.Tensor, torch.Tensor]],
+    cache: list[tuple[torch.Tensor, torch.Tensor]],
     window_size: int,
     num_sink: int,
     num_recent: int,
-) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
     """Compress cache using mean pooling baseline."""
     compressed = []
 
@@ -286,12 +289,12 @@ def compress_cache_mean(
 
 
 def compress_cache_with_baseline(
-    cache: List[Tuple[torch.Tensor, torch.Tensor]],
+    cache: list[tuple[torch.Tensor, torch.Tensor]],
     method_name: str,
     budget: int,
     num_sink: int,
     num_recent: int,
-) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
     """Generic cache compression using baseline methods."""
     if method_name == "h2o":
         config = H2OConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
@@ -350,7 +353,7 @@ def normalize_answer(text: str) -> str:
     return text
 
 
-def compute_f1(prediction: str, ground_truths: List[str]) -> float:
+def compute_f1(prediction: str, ground_truths: list[str]) -> float:
     """Compute token-level F1 score."""
     pred_tokens = normalize_answer(prediction).split()
 
@@ -375,9 +378,10 @@ def compute_f1(prediction: str, ground_truths: List[str]) -> float:
     return best_f1
 
 
-def compute_rouge_l(prediction: str, ground_truths: List[str]) -> float:
+def compute_rouge_l(prediction: str, ground_truths: list[str]) -> float:
     """Compute ROUGE-L score."""
-    def lcs_length(x: List[str], y: List[str]) -> int:
+
+    def lcs_length(x: list[str], y: list[str]) -> int:
         m, n = len(x), len(y)
         dp = [[0] * (n + 1) for _ in range(m + 1)]
         for i in range(1, m + 1):
@@ -409,7 +413,7 @@ def compute_rouge_l(prediction: str, ground_truths: List[str]) -> float:
     return best_score
 
 
-def compute_accuracy(prediction: str, ground_truths: List[str]) -> float:
+def compute_accuracy(prediction: str, ground_truths: list[str]) -> float:
     """Compute exact match accuracy."""
     pred_norm = normalize_answer(prediction)
     for gt in ground_truths:
@@ -418,8 +422,9 @@ def compute_accuracy(prediction: str, ground_truths: List[str]) -> float:
     return 0.0
 
 
-def compute_edit_similarity(prediction: str, ground_truths: List[str]) -> float:
+def compute_edit_similarity(prediction: str, ground_truths: list[str]) -> float:
     """Compute edit similarity for code completion."""
+
     def edit_distance(s1: str, s2: str) -> int:
         m, n = len(s1), len(s2)
         dp = [[0] * (n + 1) for _ in range(m + 1)]
@@ -450,15 +455,15 @@ def compute_edit_similarity(prediction: str, ground_truths: List[str]) -> float:
 def evaluate_sample(
     model,
     tokenizer,
-    sample: Dict,
+    sample: dict,
     method: str,
-    sidecar: Optional[SidecarPPL],
-    task_config: Dict,
+    sidecar: SidecarPPL | None,
+    task_config: dict,
     window_size: int,
     num_sink: int,
     num_recent: int,
     max_context_length: int,
-) -> Tuple[float, str]:
+) -> tuple[float, str]:
     """
     Evaluate a single sample.
 
@@ -502,9 +507,7 @@ def evaluate_sample(
     elif method == "mean":
         compressed = compress_cache_mean(cache, window_size, num_sink, num_recent)
     else:
-        compressed = compress_cache_with_baseline(
-            cache, method, budget, num_sink, num_recent
-        )
+        compressed = compress_cache_with_baseline(cache, method, budget, num_sink, num_recent)
 
     # Generate with compressed cache
     max_new_tokens = task_config.get("max_gen", 64)
@@ -520,7 +523,7 @@ def evaluate_sample(
 
     # Decode response
     response = tokenizer.decode(
-        generated[0, question_ids.shape[1]:],
+        generated[0, question_ids.shape[1] :],
         skip_special_tokens=True,
     ).strip()
 
@@ -549,13 +552,13 @@ def evaluate_task(
     tokenizer,
     task_name: str,
     method: str,
-    sidecar: Optional[SidecarPPL],
+    sidecar: SidecarPPL | None,
     window_size: int,
     num_sink: int,
     num_recent: int,
     num_samples: int,
     max_context_length: int,
-) -> Dict:
+) -> dict:
     """Evaluate a single LongBench task."""
     task_config = TASK_CONFIGS.get(task_name, {"type": "qa", "metric": "f1", "max_gen": 64})
 
@@ -568,8 +571,16 @@ def evaluate_task(
     for sample in tqdm(samples, desc=f"{task_name}", leave=False):
         try:
             score, _ = evaluate_sample(
-                model, tokenizer, sample, method, sidecar, task_config,
-                window_size, num_sink, num_recent, max_context_length
+                model,
+                tokenizer,
+                sample,
+                method,
+                sidecar,
+                task_config,
+                window_size,
+                num_sink,
+                num_recent,
+                max_context_length,
             )
             scores.append(score)
         except Exception as e:
@@ -653,9 +664,16 @@ def main():
             logger.info(f"  Task: {task}")
             try:
                 result = evaluate_task(
-                    model, tokenizer, task, method, sidecar,
-                    args.window_size, args.num_sink, args.num_recent,
-                    args.num_samples, args.max_context_length
+                    model,
+                    tokenizer,
+                    task,
+                    method,
+                    sidecar,
+                    args.window_size,
+                    args.num_sink,
+                    args.num_recent,
+                    args.num_samples,
+                    args.max_context_length,
                 )
                 method_results[task] = result
                 logger.info(f"    Score: {result['score']:.3f} ({result['metric']})")

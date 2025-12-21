@@ -24,7 +24,6 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -33,19 +32,23 @@ from tqdm import tqdm
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.LST.sidecar import SidecarPPL
 from src.baselines import (
-    H2O, H2OConfig,
-    StreamingLLM, StreamingLLMConfig,
-    TOVA, TOVAConfig,
-    KVMerger, KVMergerConfig,
-    WeightedKV, WeightedKVConfig,
-    CaM, CaMConfig,
+    H2O,
+    TOVA,
+    CaM,
+    CaMConfig,
+    H2OConfig,
+    KVMerger,
+    KVMergerConfig,
+    StreamingLLM,
+    StreamingLLMConfig,
+    TOVAConfig,
+    WeightedKV,
+    WeightedKVConfig,
 )
+from src.LST.sidecar import SidecarPPL
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # Needle template
@@ -114,7 +117,7 @@ def generate_haystack(
     needle_depth: float,
     magic_number: int,
     seed: int = 42,
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
     """
     Generate a haystack with a needle inserted at specified depth.
 
@@ -162,12 +165,12 @@ def generate_haystack(
 
 
 def compress_cache_lst(
-    cache: List[Tuple[torch.Tensor, torch.Tensor]],
+    cache: list[tuple[torch.Tensor, torch.Tensor]],
     sidecar: SidecarPPL,
     window_size: int,
     num_sink: int,
     num_recent: int,
-) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
     """Compress cache using LST sidecar."""
     compressed = []
 
@@ -217,11 +220,11 @@ def compress_cache_lst(
 
 
 def compress_cache_mean(
-    cache: List[Tuple[torch.Tensor, torch.Tensor]],
+    cache: list[tuple[torch.Tensor, torch.Tensor]],
     window_size: int,
     num_sink: int,
     num_recent: int,
-) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
     """Compress cache using mean pooling baseline."""
     compressed = []
 
@@ -264,12 +267,12 @@ def compress_cache_mean(
 
 
 def compress_cache_with_baseline(
-    cache: List[Tuple[torch.Tensor, torch.Tensor]],
+    cache: list[tuple[torch.Tensor, torch.Tensor]],
     method_name: str,
     budget: int,
     num_sink: int,
     num_recent: int,
-) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
     """Generic cache compression using baseline methods."""
     if method_name == "h2o":
         config = H2OConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
@@ -317,9 +320,9 @@ def evaluate_retrieval(
     context: str,
     question: str,
     expected_answer: str,
-    cache: List[Tuple[torch.Tensor, torch.Tensor]],
+    cache: list[tuple[torch.Tensor, torch.Tensor]],
     max_new_tokens: int = 20,
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """
     Evaluate if model can retrieve the answer using compressed cache.
 
@@ -356,7 +359,7 @@ def evaluate_retrieval(
 
     # Decode response
     response = tokenizer.decode(
-        generated[0, question_tokens.shape[1]:],
+        generated[0, question_tokens.shape[1] :],
         skip_special_tokens=True,
     ).strip()
 
@@ -370,15 +373,15 @@ def evaluate_niah(
     model,
     tokenizer,
     method: str,
-    sidecar: Optional[SidecarPPL] = None,
-    context_lengths: List[int] = None,
-    depths: List[float] = None,
+    sidecar: SidecarPPL | None = None,
+    context_lengths: list[int] = None,
+    depths: list[float] = None,
     window_size: int = 8,
     num_sink: int = 4,
     num_recent: int = 8,
     num_samples: int = 5,
     seed: int = 42,
-) -> Dict:
+) -> dict:
     """
     Run full NIAH evaluation.
 
@@ -448,9 +451,7 @@ def evaluate_niah(
                         cache, sidecar, window_size, num_sink, num_recent
                     )
                 elif method == "mean":
-                    compressed = compress_cache_mean(
-                        cache, window_size, num_sink, num_recent
-                    )
+                    compressed = compress_cache_mean(cache, window_size, num_sink, num_recent)
                 else:
                     compressed = compress_cache_with_baseline(
                         cache, method, budget, num_sink, num_recent
@@ -458,8 +459,7 @@ def evaluate_niah(
 
                 # Evaluate retrieval
                 is_correct, response = evaluate_retrieval(
-                    model, tokenizer, context, QUESTION_TEMPLATE,
-                    expected, compressed
+                    model, tokenizer, context, QUESTION_TEMPLATE, expected, compressed
                 )
 
                 if is_correct:

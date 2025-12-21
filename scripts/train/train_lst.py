@@ -43,9 +43,7 @@ from src.LST.sidecar import SidecarPPL
 from src.LST.training import LSTTrainer, create_dataloaders
 from src.LST.training.trainer import TrainerConfig
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -106,7 +104,9 @@ def main():
     parser.add_argument("--lambda_qpaa", type=float, default=0.5, help="QPAA loss weight")
     parser.add_argument("--lambda_diversity", type=float, default=0.1, help="Diversity loss weight")
     parser.add_argument("--num_probes", type=int, default=8, help="Number of query probes for QPAA")
-    parser.add_argument("--qpaa_warmup", type=int, default=200, help="Steps before QPAA is fully enabled")
+    parser.add_argument(
+        "--qpaa_warmup", type=int, default=200, help="Steps before QPAA is fully enabled"
+    )
 
     # Compression
     parser.add_argument("--num_sink", type=int, default=4, help="Number of sink tokens")
@@ -118,7 +118,9 @@ def main():
     parser.add_argument("--val_samples", type=int, default=100, help="Validation samples")
 
     # Checkpointing
-    parser.add_argument("--output_dir", type=str, default="./checkpoints/lst", help="Output directory")
+    parser.add_argument(
+        "--output_dir", type=str, default="./checkpoints/lst", help="Output directory"
+    )
     parser.add_argument("--save_steps", type=int, default=500, help="Save every N steps")
     parser.add_argument("--eval_steps", type=int, default=200, help="Evaluate every N steps")
     parser.add_argument("--log_steps", type=int, default=20, help="Log every N steps")

@@ -129,7 +129,7 @@ class DiversityLoss(nn.Module):
 
         # Penalize high similarity between different super-tokens
         # Using squared similarity to penalize high values more
-        loss = (off_diag ** 2).mean()
+        loss = (off_diag**2).mean()
 
         return loss
 

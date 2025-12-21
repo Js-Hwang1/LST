@@ -7,10 +7,9 @@ consistent interfaces for evaluation and comparison.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Optional, Tuple, Any
+from dataclasses import dataclass
+from typing import Any
 
-import torch
 from torch import Tensor
 
 
@@ -21,7 +20,7 @@ class CompressionConfig:
     # Compression parameters
     num_sink: int = 4  # Number of sink tokens to keep
     num_recent: int = 8  # Number of recent tokens to keep
-    budget: Optional[int] = None  # Total token budget (if specified)
+    budget: int | None = None  # Total token budget (if specified)
 
     # Model parameters (for reference)
     d_head: int = 64  # Dimension per attention head
@@ -60,9 +59,9 @@ class CompressionMethod(ABC):
         self,
         keys: Tensor,
         values: Tensor,
-        attention_scores: Optional[Tensor] = None,
+        attention_scores: Tensor | None = None,
         **kwargs: Any,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Compress a KV cache to the specified budget.
 

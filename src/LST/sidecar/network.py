@@ -12,11 +12,8 @@ Key architectural insights:
 4. No dropout during training (for PPL optimization)
 """
 
-from typing import Optional, Tuple, List
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import Tensor
 
 from ..config import LSTConfig
@@ -60,9 +57,7 @@ class SidecarPPL(nn.Module):
         self.input_proj = nn.Linear(2 * d_head, hidden_dim)
 
         # Learnable positional embedding
-        self.pos_embed = nn.Parameter(
-            torch.randn(1, window_size, hidden_dim) * 0.02
-        )
+        self.pos_embed = nn.Parameter(torch.randn(1, window_size, hidden_dim) * 0.02)
 
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
@@ -73,14 +68,10 @@ class SidecarPPL(nn.Module):
             activation="gelu",
             batch_first=True,
         )
-        self.encoder = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_encoder_layers
-        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
 
         # Attention pooling with learned query
-        self.agg_query = nn.Parameter(
-            torch.randn(1, 1, hidden_dim) * 0.5
-        )
+        self.agg_query = nn.Parameter(torch.randn(1, 1, hidden_dim) * 0.5)
         self.agg_attn = nn.MultiheadAttention(
             hidden_dim, num_heads, dropout=dropout, batch_first=True
         )
@@ -101,7 +92,7 @@ class SidecarPPL(nn.Module):
     def forward(
         self,
         kv_window: Tensor,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Compress a window of KV pairs to a single super-token.
 
@@ -178,7 +169,7 @@ class Sidecar(nn.Module):
         self,
         keys: Tensor,
         values: Tensor,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Compress a window of K, V pairs.
 
@@ -201,12 +192,12 @@ class Sidecar(nn.Module):
 
 
 def compress_cache(
-    cache: List[Tuple[Tensor, Tensor]],
+    cache: list[tuple[Tensor, Tensor]],
     sidecar: nn.Module,
     window_size: int,
     num_sink: int = 4,
     num_recent: int = 8,
-) -> List[Tuple[Tensor, Tensor]]:
+) -> list[tuple[Tensor, Tensor]]:
     """
     Compress a full KV cache using the sidecar.
 
@@ -220,13 +211,9 @@ def compress_cache(
     Returns:
         List of (K_compressed, V_compressed) tuples
     """
-    num_layers = len(cache)
-    device = cache[0][0].device
-    dtype = cache[0][0].dtype
-
     new_cache = []
 
-    for layer_idx in range(num_layers):
+    for layer_idx in range(len(cache)):
         k = cache[layer_idx][0]  # (1, H, S, D)
         v = cache[layer_idx][1]
 

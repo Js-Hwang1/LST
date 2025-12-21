@@ -30,30 +30,32 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from datasets import load_dataset
 from tqdm import tqdm
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.LST.sidecar import SidecarPPL
 from src.baselines import (
-    H2O, H2OConfig,
-    StreamingLLM, StreamingLLMConfig,
-    TOVA, TOVAConfig,
-    KVMerger, KVMergerConfig,
-    WeightedKV, WeightedKVConfig,
-    CaM, CaMConfig,
+    H2O,
+    TOVA,
+    CaM,
+    CaMConfig,
+    H2OConfig,
+    KVMerger,
+    KVMergerConfig,
+    StreamingLLM,
+    StreamingLLMConfig,
+    TOVAConfig,
+    WeightedKV,
+    WeightedKVConfig,
 )
+from src.LST.sidecar import SidecarPPL
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -94,12 +96,12 @@ def load_sidecar(checkpoint_path: str, device: torch.device) -> SidecarPPL:
 
 
 def compress_cache_lst(
-    cache: List[Tuple[torch.Tensor, torch.Tensor]],
+    cache: list[tuple[torch.Tensor, torch.Tensor]],
     sidecar: SidecarPPL,
     window_size: int,
     num_sink: int,
     num_recent: int,
-) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
     """Compress cache using LST sidecar."""
     compressed = []
 
@@ -149,11 +151,11 @@ def compress_cache_lst(
 
 
 def compress_cache_mean(
-    cache: List[Tuple[torch.Tensor, torch.Tensor]],
+    cache: list[tuple[torch.Tensor, torch.Tensor]],
     window_size: int,
     num_sink: int,
     num_recent: int,
-) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
     """Compress cache using mean pooling baseline."""
     compressed = []
 
@@ -197,13 +199,13 @@ def compress_cache_mean(
 
 
 def compress_cache_with_baseline(
-    cache: List[Tuple[torch.Tensor, torch.Tensor]],
+    cache: list[tuple[torch.Tensor, torch.Tensor]],
     method_name: str,
     budget: int,
     num_sink: int,
     num_recent: int,
     **kwargs,
-) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
     """
     Generic cache compression using baseline methods.
 
@@ -256,14 +258,14 @@ def compress_cache_with_baseline(
 def evaluate_ppl(
     model,
     tokenizer,
-    samples: List[str],
+    samples: list[str],
     method: str,
-    sidecar: Optional[SidecarPPL] = None,
+    sidecar: SidecarPPL | None = None,
     window_size: int = 8,
     num_sink: int = 4,
     num_recent: int = 8,
     prefix_ratio: float = 0.5,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Evaluate perplexity for a given compression method."""
     device = next(model.parameters()).device
     losses = []
@@ -296,9 +298,7 @@ def evaluate_ppl(
         elif method == "mean":
             compressed = compress_cache_mean(cache, window_size, num_sink, num_recent)
         elif method in ["h2o", "streaming", "tova", "kvmerger", "weightedkv", "cam"]:
-            compressed = compress_cache_with_baseline(
-                cache, method, budget, num_sink, num_recent
-            )
+            compressed = compress_cache_with_baseline(cache, method, budget, num_sink, num_recent)
         else:
             raise ValueError(f"Unknown method: {method}")
 
@@ -357,9 +357,7 @@ def main():
             sidecar = load_sidecar(args.checkpoint, device)
 
     # Load evaluation data
-    dataset = load_dataset(
-        "wikitext", "wikitext-103-v1", split="test", trust_remote_code=True
-    )
+    dataset = load_dataset("wikitext", "wikitext-103-v1", split="test", trust_remote_code=True)
     dataset = dataset.shuffle(seed=args.seed)
 
     samples = []
@@ -419,8 +417,8 @@ def main():
 
     for method, result in results.items():
         mtype = method_types.get(method, "unknown")
-        ppl_str = f"{result['ppl']:.2f}" if not np.isnan(result['ppl']) else "FAILED"
-        loss_str = f"{result['loss']:.4f}" if not np.isnan(result['loss']) else "FAILED"
+        ppl_str = f"{result['ppl']:.2f}" if not np.isnan(result["ppl"]) else "FAILED"
+        loss_str = f"{result['loss']:.4f}" if not np.isnan(result["loss"]) else "FAILED"
         print(f"{method:<15} {mtype:<12} {ppl_str:>10} {loss_str:>10}")
 
     print("=" * 60)

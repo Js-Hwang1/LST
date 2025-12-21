@@ -20,12 +20,12 @@ Key differences from H2O:
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Any
+from typing import Any
 
 import torch
 from torch import Tensor
 
-from .base import CompressionMethod, CompressionConfig
+from .base import CompressionConfig, CompressionMethod
 
 
 @dataclass
@@ -63,7 +63,7 @@ class TOVA(CompressionMethod):
     def _compute_attention_scores(
         self,
         keys: Tensor,
-        attention_scores: Optional[Tensor] = None,
+        attention_scores: Tensor | None = None,
     ) -> Tensor:
         """
         Compute attention-based importance scores.
@@ -91,9 +91,9 @@ class TOVA(CompressionMethod):
         self,
         keys: Tensor,
         values: Tensor,
-        attention_scores: Optional[Tensor] = None,
+        attention_scores: Tensor | None = None,
         **kwargs: Any,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Compress KV cache using TOVA eviction.
 
@@ -161,8 +161,12 @@ class TOVA(CompressionMethod):
         values_padded = []
         for k, v in zip(keys_out, values_out):
             if k.shape[0] < max_len:
-                k_pad = torch.zeros(max_len - k.shape[0], k.shape[-1], device=keys.device, dtype=k.dtype)
-                v_pad = torch.zeros(max_len - v.shape[0], v.shape[-1], device=values.device, dtype=v.dtype)
+                k_pad = torch.zeros(
+                    max_len - k.shape[0], k.shape[-1], device=keys.device, dtype=k.dtype
+                )
+                v_pad = torch.zeros(
+                    max_len - v.shape[0], v.shape[-1], device=values.device, dtype=v.dtype
+                )
                 k = torch.cat([k, k_pad], dim=0)
                 v = torch.cat([v, v_pad], dim=0)
             keys_padded.append(k.unsqueeze(0))
@@ -185,7 +189,7 @@ def tova_evict(
     budget: int,
     num_sink: int = 4,
     num_recent: int = 8,
-) -> Tuple[Tensor, Tensor]:
+) -> tuple[Tensor, Tensor]:
     """Standalone TOVA function for testing."""
     config = TOVAConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
     method = TOVA(config)

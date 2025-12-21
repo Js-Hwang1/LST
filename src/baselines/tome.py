@@ -21,13 +21,13 @@ unlike eviction methods that lose information entirely.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Tuple, Any
+from typing import Any
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from .base import CompressionMethod, CompressionConfig
+from .base import CompressionConfig, CompressionMethod
 
 
 @dataclass
@@ -94,7 +94,7 @@ class ToMe(CompressionMethod):
         self,
         similarity: Tensor,
         r: int,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Bipartite matching to find optimal merge pairs.
 
@@ -130,7 +130,7 @@ class ToMe(CompressionMethod):
         values: Tensor,
         src_indices: Tensor,
         dst_indices: Tensor,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Merge source tokens into destination tokens.
 
@@ -151,12 +151,6 @@ class ToMe(CompressionMethod):
         values_out = values.clone()
 
         # Merge: average source into destination
-        batch_idx = torch.arange(batch_size, device=keys.device).unsqueeze(-1).expand(-1, r)
-
-        # Get source and destination tokens
-        src_k = keys[batch_idx, src_indices]  # (batch, r, d_head)
-        src_v = values[batch_idx, src_indices]
-
         # Simple averaging (could use weighted average with similarity)
         for b in range(batch_size):
             for i in range(r):
@@ -191,9 +185,9 @@ class ToMe(CompressionMethod):
         self,
         keys: Tensor,
         values: Tensor,
-        attention_scores: Optional[Tensor] = None,
+        attention_scores: Tensor | None = None,
         **kwargs: Any,
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Compress KV cache using Token Merging.
 
@@ -263,7 +257,6 @@ class ToMe(CompressionMethod):
                     break
 
                 # Partition: even as dst, odd as src
-                n_dst = (curr_len + 1) // 2
                 n_src = curr_len // 2
 
                 if n_src == 0:
@@ -271,8 +264,6 @@ class ToMe(CompressionMethod):
 
                 dst_keys = k_merged[:, ::2, :]  # Even indices
                 src_keys = k_merged[:, 1::2, :]  # Odd indices
-                dst_values = v_merged[:, ::2, :]
-                src_values = v_merged[:, 1::2, :]
 
                 # Compute similarity
                 similarity = self.compute_similarity(src_keys, dst_keys)
@@ -285,7 +276,9 @@ class ToMe(CompressionMethod):
                 full_dst_idx = 2 * dst_idx  # Map back to even indices
 
                 # Merge
-                k_merged, v_merged = self.merge_tokens(k_merged, v_merged, full_src_idx, full_dst_idx)
+                k_merged, v_merged = self.merge_tokens(
+                    k_merged, v_merged, full_src_idx, full_dst_idx
+                )
 
             keys_out = torch.cat([k_sink, k_merged, k_recent], dim=1)
             values_out = torch.cat([v_sink, v_merged, v_recent], dim=1)
@@ -305,7 +298,7 @@ def tome_merge(
     r: int = 4,
     num_sink: int = 4,
     num_recent: int = 8,
-) -> Tuple[Tensor, Tensor]:
+) -> tuple[Tensor, Tensor]:
     """
     Standalone ToMe merge function for testing and integration.
 

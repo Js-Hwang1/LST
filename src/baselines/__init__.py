@@ -19,14 +19,14 @@ Merging-based:
 - CaM: Cache Merging (Zhang et al., ICML 2024)
 """
 
-from .base import CompressionMethod, CompressionConfig
+from .base import CompressionConfig, CompressionMethod
+from .cam import CaM, CaMConfig
 from .h2o import H2O, H2OConfig
+from .kvmerger import KVMerger, KVMergerConfig
 from .streaming import StreamingLLM, StreamingLLMConfig
 from .tome import ToMe, ToMeConfig
-from .kvmerger import KVMerger, KVMergerConfig
-from .weightedkv import WeightedKV, WeightedKVConfig
-from .cam import CaM, CaMConfig
 from .tova import TOVA, TOVAConfig
+from .weightedkv import WeightedKV, WeightedKVConfig
 
 __all__ = [
     # Base

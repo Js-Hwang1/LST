@@ -2,11 +2,12 @@
 Tests for LST (Learned Super-Token) module.
 """
 
+import sys
+from pathlib import Path
+
 import pytest
 import torch
 
-import sys
-from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.LST import LSTConfig, Sidecar, SidecarPPL
@@ -317,12 +318,18 @@ class TestBaselines:
     def test_all_baselines_no_crash_on_short_seq(self):
         """Test that all baselines handle short sequences gracefully."""
         from src.baselines import (
-            H2O, H2OConfig,
-            StreamingLLM, StreamingLLMConfig,
-            KVMerger, KVMergerConfig,
-            WeightedKV, WeightedKVConfig,
-            CaM, CaMConfig,
-            TOVA, TOVAConfig,
+            H2O,
+            TOVA,
+            CaM,
+            CaMConfig,
+            H2OConfig,
+            KVMerger,
+            KVMergerConfig,
+            StreamingLLM,
+            StreamingLLMConfig,
+            TOVAConfig,
+            WeightedKV,
+            WeightedKVConfig,
         )
 
         batch_size = 2

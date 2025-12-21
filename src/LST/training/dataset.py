@@ -6,11 +6,10 @@ Efficient text datasets for training LST sidecars.
 """
 
 import logging
-from typing import Optional, Tuple
 
 import torch
 from torch import Tensor
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
@@ -49,9 +48,7 @@ class TextDataset(Dataset):
 
         from datasets import load_dataset
 
-        dataset = load_dataset(
-            dataset_name, dataset_config, split=split, trust_remote_code=True
-        )
+        dataset = load_dataset(dataset_name, dataset_config, split=split, trust_remote_code=True)
         dataset = dataset.shuffle(seed=seed)
 
         # Pre-tokenize samples
@@ -101,7 +98,7 @@ def create_dataloaders(
     val_samples: int = 100,
     seed: int = 42,
     num_workers: int = 0,
-) -> Tuple[DataLoader, DataLoader]:
+) -> tuple[DataLoader, DataLoader]:
     """
     Create training and validation dataloaders.
 

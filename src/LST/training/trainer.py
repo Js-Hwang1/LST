@@ -15,8 +15,7 @@ Features:
 import logging
 import os
 import random
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -25,13 +24,14 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from ..sidecar import SidecarPPL
 from ..losses import CombinedLoss, LossWeights
+from ..sidecar import SidecarPPL
 
 logger = logging.getLogger(__name__)
 
 try:
     import wandb
+
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
@@ -108,9 +108,9 @@ class LSTTrainer:
         sidecar: SidecarPPL,
         config: TrainerConfig,
         train_loader: DataLoader,
-        val_loader: Optional[DataLoader] = None,
-        wandb_project: Optional[str] = None,
-        run_name: Optional[str] = None,
+        val_loader: DataLoader | None = None,
+        wandb_project: str | None = None,
+        run_name: str | None = None,
     ):
         self.model = model
         self.sidecar = sidecar
@@ -163,8 +163,8 @@ class LSTTrainer:
 
     def compress_cache(
         self,
-        cache: List[Tuple[Tensor, Tensor]],
-    ) -> Tuple[List[Tuple[Tensor, Tensor]], Optional[Tensor]]:
+        cache: list[tuple[Tensor, Tensor]],
+    ) -> tuple[list[tuple[Tensor, Tensor]], Tensor | None]:
         """
         Compress KV cache with sidecar.
 
@@ -182,12 +182,12 @@ class LSTTrainer:
                 continue
 
             # Split: sink, middle, recent
-            ks = k[:, :, :self.config.num_sink, :]
-            vs = v[:, :, :self.config.num_sink, :]
-            kr = k[:, :, -self.config.num_recent:, :]
-            vr = v[:, :, -self.config.num_recent:, :]
-            km = k[:, :, self.config.num_sink:-self.config.num_recent, :]
-            vm = v[:, :, self.config.num_sink:-self.config.num_recent, :]
+            ks = k[:, :, : self.config.num_sink, :]
+            vs = v[:, :, : self.config.num_sink, :]
+            kr = k[:, :, -self.config.num_recent :, :]
+            vr = v[:, :, -self.config.num_recent :, :]
+            km = k[:, :, self.config.num_sink : -self.config.num_recent, :]
+            vm = v[:, :, self.config.num_sink : -self.config.num_recent, :]
 
             M = km.shape[2]
             num_windows = M // self.config.window_size
@@ -237,7 +237,7 @@ class LSTTrainer:
         self,
         input_ids: Tensor,
         step: int,
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """
         Single training step.
 
@@ -287,7 +287,7 @@ class LSTTrainer:
         return loss_dict
 
     @torch.no_grad()
-    def validate(self) -> Dict[str, float]:
+    def validate(self) -> dict[str, float]:
         """Run validation."""
         if self.val_loader is None:
             return {}
@@ -320,7 +320,7 @@ class LSTTrainer:
         # Average losses
         avg_losses = {}
         for key in all_losses[0]:
-            avg_losses[f"val/{key}"] = np.mean([l[key] for l in all_losses])
+            avg_losses[f"val/{key}"] = np.mean([loss_d[key] for loss_d in all_losses])
 
         return avg_losses
 
@@ -349,7 +349,10 @@ class LSTTrainer:
 
         logger.info("Starting training...")
         logger.info(f"  Max steps: {self.config.max_steps}")
-        logger.info(f"  Loss weights: PPL={self.config.lambda_ppl}, QPAA={self.config.lambda_qpaa}, Div={self.config.lambda_diversity}")
+        logger.info(
+            f"  Loss weights: PPL={self.config.lambda_ppl}, "
+            f"QPAA={self.config.lambda_qpaa}, Div={self.config.lambda_diversity}"
+        )
 
         global_step = 0
         train_iter = iter(self.train_loader)
@@ -383,15 +386,17 @@ class LSTTrainer:
                 )
 
                 if WANDB_AVAILABLE and self.wandb_project:
-                    wandb.log({
-                        "train/loss": loss_dict["total"],
-                        "train/ppl": ppl,
-                        "train/ppl_loss": loss_dict.get("ppl", 0),
-                        "train/qpaa_loss": loss_dict.get("qpaa", 0),
-                        "train/diversity_loss": loss_dict.get("diversity", 0),
-                        "train/lr": lr,
-                        "step": global_step,
-                    })
+                    wandb.log(
+                        {
+                            "train/loss": loss_dict["total"],
+                            "train/ppl": ppl,
+                            "train/ppl_loss": loss_dict.get("ppl", 0),
+                            "train/qpaa_loss": loss_dict.get("qpaa", 0),
+                            "train/diversity_loss": loss_dict.get("diversity", 0),
+                            "train/lr": lr,
+                            "step": global_step,
+                        }
+                    )
 
             # Validation
             if global_step % self.config.eval_steps == 0:
@@ -409,9 +414,7 @@ class LSTTrainer:
 
             # Checkpointing
             if global_step % self.config.save_steps == 0:
-                ckpt_path = os.path.join(
-                    self.config.output_dir, f"step_{global_step}.pt"
-                )
+                ckpt_path = os.path.join(self.config.output_dir, f"step_{global_step}.pt")
                 self.save_checkpoint(global_step, ckpt_path)
 
         pbar.close()
