@@ -1,0 +1,20 @@
+{
+  "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "num_samples": 100,
+  "window_size": 8,
+  "compression_ratio": "8:1",
+  "num_sink": 4,
+  "num_recent": 8,
+  "seed": 42,
+  "date": "2025-12-21",
+  "results": {
+    "dense": {"ppl": 11.22, "loss": 2.4178, "type": "baseline"},
+    "kvmerger": {"ppl": 24.13, "loss": 3.1836, "type": "merging"},
+    "mean": {"ppl": 24.80, "loss": 3.2109, "type": "merging"},
+    "streaming": {"ppl": 25.50, "loss": 3.2389, "type": "eviction"},
+    "weightedkv": {"ppl": 26.42, "loss": 3.2741, "type": "merging"},
+    "h2o": {"ppl": 28.04, "loss": 3.3338, "type": "eviction"},
+    "cam": {"ppl": 28.19, "loss": 3.3390, "type": "merging"},
+    "tova": {"ppl": 28.22, "loss": 3.3402, "type": "eviction"}
+  }
+}

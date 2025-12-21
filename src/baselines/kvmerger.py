@@ -98,7 +98,7 @@ class KVMerger(CompressionMethod):
 
         for b in range(batch_size):
             sets = []
-            sim_b = similarity[b].cpu().numpy()
+            sim_b = similarity[b].float().cpu().numpy()
 
             i = 0
             while i < len(sim_b):
@@ -279,7 +279,7 @@ class KVMerger(CompressionMethod):
         k_padded = []
         v_padded = []
 
-        for k, v in zip(k_compressed_list, v_compressed_list):
+        for k, v in zip(k_compressed_list, v_compressed_list, strict=True):
             if k.shape[1] < max_len:
                 pad_len = max_len - k.shape[1]
                 k = F.pad(k, (0, 0, 0, pad_len))
@@ -294,10 +294,29 @@ class KVMerger(CompressionMethod):
         keys_out = torch.cat([k_sink, k_middle_out, k_recent], dim=1)
         values_out = torch.cat([v_sink, v_middle_out, v_recent], dim=1)
 
+        # Enforce budget if specified - trim or pad to exact length
+        budget = self.get_budget(seq_len)
+        out_len = keys_out.shape[1]
+
+        if out_len > budget:
+            # Trim from middle (keep sink and recent)
+            keep_end = budget - num_recent if num_recent > 0 else budget
+            if num_recent > 0:
+                keys_out = torch.cat([keys_out[:, :keep_end, :], keys_out[:, -num_recent:, :]], dim=1)
+                values_out = torch.cat([values_out[:, :keep_end, :], values_out[:, -num_recent:, :]], dim=1)
+            else:
+                keys_out = keys_out[:, :budget, :]
+                values_out = values_out[:, :budget, :]
+        elif out_len < budget:
+            # Pad to budget (shouldn't happen often with merging)
+            pad_len = budget - out_len
+            keys_out = F.pad(keys_out, (0, 0, 0, pad_len))
+            values_out = F.pad(values_out, (0, 0, 0, pad_len))
+
         if is_4d:
-            out_len = keys_out.shape[1]
-            keys_out = keys_out.view(batch_size, n_heads, out_len, d_head)
-            values_out = values_out.view(batch_size, n_heads, out_len, d_head)
+            final_len = keys_out.shape[1]
+            keys_out = keys_out.view(batch_size, n_heads, final_len, d_head)
+            values_out = values_out.view(batch_size, n_heads, final_len, d_head)
 
         return keys_out, values_out
 

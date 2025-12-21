@@ -2,9 +2,6 @@
 
 *Query-Invariant Learned Compression for Long-Context LLMs*
 
-**Target Venue:** ICML 2026
-**Status:** See [STATUS.md](STATUS.md) for current progress
-
 ---
 
 ## Abstract
@@ -49,19 +46,20 @@ We compare LST against 7 state-of-the-art KV cache compression methods:
 
 ## Benchmarks
 
-### Perplexity (WikiText-2)
+### Perplexity (WikiText-103)
 
 | Method | Compression | TinyLlama-1.1B | Llama-2-7B | Llama-3-8B | Llama-3-70B |
 |--------|-------------|----------------|------------|------------|-------------|
-| Dense (No Compression) | 1:1 | -- | -- | -- | -- |
-| **LST (Ours)** | 8:1 | -- | -- | -- | -- |
-| H2O | 8:1 | -- | -- | -- | -- |
-| StreamingLLM | 8:1 | -- | -- | -- | -- |
-| TOVA | 8:1 | -- | -- | -- | -- |
+| Dense (No Compression) | 1:1 | **11.22** | -- | -- | -- |
+| **LST (Ours)** | 8:1 | *pending* | -- | -- | -- |
+| KVMerger | 8:1 | 24.13 | -- | -- | -- |
+| Mean Pooling | 8:1 | 24.80 | -- | -- | -- |
+| StreamingLLM | 8:1 | 25.50 | -- | -- | -- |
+| WeightedKV | 8:1 | 26.42 | -- | -- | -- |
+| H2O | 8:1 | 28.04 | -- | -- | -- |
+| CaM | 8:1 | 28.19 | -- | -- | -- |
+| TOVA | 8:1 | 28.22 | -- | -- | -- |
 | ToMe | 8:1 | -- | -- | -- | -- |
-| KVMerger | 8:1 | -- | -- | -- | -- |
-| WeightedKV | 8:1 | -- | -- | -- | -- |
-| CaM | 8:1 | -- | -- | -- | -- |
 
 ### Needle-in-a-Haystack (NIAH)
 

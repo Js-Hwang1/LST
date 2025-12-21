@@ -35,6 +35,7 @@ import numpy as np
 import torch
 from datasets import load_dataset
 from tqdm import tqdm
+from transformers.cache_utils import DynamicCache
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -224,7 +225,7 @@ def compress_cache_with_baseline(
         config = TOVAConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
         method = TOVA(config)
     elif method_name == "kvmerger":
-        config = KVMergerConfig(num_sink=num_sink, num_recent=num_recent)
+        config = KVMergerConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
         method = KVMerger(config)
     elif method_name == "weightedkv":
         config = WeightedKVConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
@@ -285,7 +286,16 @@ def evaluate_ppl(
         # Get cache from prefix
         with torch.no_grad():
             outputs = model(prefix, use_cache=True)
-            cache = list(outputs.past_key_values)
+            past_kv = outputs.past_key_values
+
+            # Convert DynamicCache to list of tuples if needed
+            if hasattr(past_kv, 'key_cache'):
+                # DynamicCache format
+                cache = [(past_kv.key_cache[i], past_kv.value_cache[i])
+                         for i in range(len(past_kv.key_cache))]
+            else:
+                # Already tuple format
+                cache = list(past_kv)
 
         # Compute budget for eviction methods
         budget = num_sink + num_recent + (prefix_len - num_sink - num_recent) // window_size
@@ -302,11 +312,16 @@ def evaluate_ppl(
         else:
             raise ValueError(f"Unknown method: {method}")
 
+        # Convert back to DynamicCache for model
+        new_cache = DynamicCache()
+        for k, v in compressed:
+            new_cache.update(k, v, layer_idx=len(new_cache))
+
         # Compute loss on suffix
         with torch.no_grad():
             labels = suffix.clone()
             labels[:, 0] = -100
-            outputs = model(suffix, past_key_values=tuple(compressed), labels=labels)
+            outputs = model(suffix, past_key_values=new_cache, labels=labels)
             losses.append(outputs.loss.item())
 
     mean_loss = np.mean(losses)
@@ -357,7 +372,7 @@ def main():
             sidecar = load_sidecar(args.checkpoint, device)
 
     # Load evaluation data
-    dataset = load_dataset("wikitext", "wikitext-103-v1", split="test", trust_remote_code=True)
+    dataset = load_dataset("wikitext", "wikitext-103-v1", split="test")
     dataset = dataset.shuffle(seed=args.seed)
 
     samples = []

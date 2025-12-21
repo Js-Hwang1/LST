@@ -14,8 +14,6 @@ The output file can be committed to the repo or uploaded separately.
 
 import argparse
 import logging
-import os
-import sys
 from pathlib import Path
 
 import torch

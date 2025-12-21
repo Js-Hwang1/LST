@@ -150,7 +150,7 @@ class CombinedLoss(nn.Module):
         """Compute QPAA loss averaged across layers."""
         losses = []
 
-        for (k_dense, v_dense), (k_comp, v_comp) in zip(dense_cache, compressed_cache):
+        for (k_dense, v_dense), (k_comp, v_comp) in zip(dense_cache, compressed_cache, strict=True):
             # Skip if shapes don't make sense
             if k_dense.shape[2] == k_comp.shape[2]:
                 continue  # No compression happened

@@ -159,7 +159,7 @@ class TOVA(CompressionMethod):
 
         keys_padded = []
         values_padded = []
-        for k, v in zip(keys_out, values_out):
+        for k, v in zip(keys_out, values_out, strict=True):
             if k.shape[0] < max_len:
                 k_pad = torch.zeros(
                     max_len - k.shape[0], k.shape[-1], device=keys.device, dtype=k.dtype

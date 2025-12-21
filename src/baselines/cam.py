@@ -110,12 +110,16 @@ class CaM(CompressionMethod):
             keep_weights = F.softmax(keep_importance, dim=0)  # Normalized
 
             # For each evicted token, distribute its value to kept tokens
+            # Scale factor: each evicted token contributes proportionally to kept tokens
+            num_evict = len(evict_idx)
+            scale = 1.0 / (num_evict + 1)  # Dampen contribution to avoid explosion
+
             for idx in evict_idx:
                 v_evict = values[b, idx]  # (d_head,)
-                evict_imp = importance[b, idx]
 
-                # Weight by relative importance
-                contribution = evict_imp * v_evict.unsqueeze(0) * keep_weights.unsqueeze(-1)
+                # Distribute evicted value to kept tokens weighted by their importance
+                # Each kept token receives: v_evict * keep_weights[i] * scale
+                contribution = v_evict.unsqueeze(0) * keep_weights.unsqueeze(-1) * scale
                 v_out = v_out + contribution
 
             merged_values.append(v_out)

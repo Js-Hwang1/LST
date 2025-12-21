@@ -80,6 +80,7 @@ class DiversityLoss(nn.Module):
         self,
         super_tokens: Tensor,
         window_representations: Tensor = None,
+        max_samples: int = 1024,
     ) -> Tensor:
         """
         InfoNCE contrastive loss.
@@ -87,6 +88,14 @@ class DiversityLoss(nn.Module):
         Each super-token should be most similar to its source window.
         """
         N = super_tokens.shape[0]
+
+        # Sample if too many tokens to avoid OOM
+        if N > max_samples:
+            indices = torch.randperm(N, device=super_tokens.device)[:max_samples]
+            super_tokens = super_tokens[indices]
+            if window_representations is not None:
+                window_representations = window_representations[indices]
+            N = max_samples
 
         if window_representations is None:
             # Self-contrast: use augmented view or just ensure diversity
@@ -112,13 +121,23 @@ class DiversityLoss(nn.Module):
 
         return loss
 
-    def _cosine_diversity_loss(self, super_tokens: Tensor) -> Tensor:
+    def _cosine_diversity_loss(self, super_tokens: Tensor, max_samples: int = 1024) -> Tensor:
         """
         Simple cosine diversity: minimize pairwise similarity.
 
         This encourages super-tokens to be as different as possible.
+
+        Args:
+            super_tokens: (N, D) normalized super-tokens
+            max_samples: Maximum number of tokens to use (to avoid OOM)
         """
         N = super_tokens.shape[0]
+
+        # Sample if too many tokens to avoid OOM
+        if N > max_samples:
+            indices = torch.randperm(N, device=super_tokens.device)[:max_samples]
+            super_tokens = super_tokens[indices]
+            N = max_samples
 
         # Pairwise cosine similarity
         sim_matrix = super_tokens @ super_tokens.T  # (N, N)
