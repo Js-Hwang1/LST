@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fmkv"
-version = "0.1.0"
-description = "Force-Matched KV Cache Compression: A Physics-Inspired Framework for LLM Inference"
+name = "lst"
+version = "0.2.0"
+description = "Learned Super-Token KV Cache Compression for LLM Inference"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
@@ -16,8 +16,7 @@ keywords = [
     "transformers",
     "kv-cache",
     "compression",
-    "force-matching",
-    "coarse-graining",
+    "super-token",
     "llm-inference",
     "attention"
 ]
@@ -55,6 +54,7 @@ dev = [
     "pytest-cov>=4.1.0",
     "black>=23.12.0",
     "ruff>=0.1.0",
+    "isort>=5.12.0",
     "mypy>=1.8.0",
     "pre-commit>=3.6.0",
 ]
@@ -63,22 +63,14 @@ eval = [
     "nltk>=3.8.0",
     "rouge-score>=0.1.2",
 ]
-all = ["fmkv[dev,eval]"]
-
-[project.scripts]
-fmkv-train = "fmkv.scripts.train:main"
-fmkv-eval = "fmkv.scripts.evaluate:main"
-fmkv-collect = "fmkv.scripts.collect_trajectories:main"
+all = ["lst[dev,eval]"]
 
 [project.urls]
-Repository = "https://github.com/anonymous/fmkv"
-Documentation = "https://github.com/anonymous/fmkv#readme"
+Repository = "https://github.com/anonymous/lst"
+Documentation = "https://github.com/anonymous/lst#readme"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-fmkv = ["configs/**/*.yaml"]
 
 [tool.black]
 line-length = 100
@@ -103,7 +95,7 @@ ignore = [
 ]
 
 [tool.ruff.isort]
-known-first-party = ["fmkv"]
+known-first-party = ["LST", "baselines"]
 
 [tool.mypy]
 python_version = "3.10"

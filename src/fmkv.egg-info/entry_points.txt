@@ -1,4 +1,0 @@
-[console_scripts]
-fmkv-collect = fmkv.scripts.collect_trajectories:main
-fmkv-eval = fmkv.scripts.evaluate:main
-fmkv-train = fmkv.scripts.train:main
