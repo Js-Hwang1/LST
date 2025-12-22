@@ -69,7 +69,7 @@ We compare LST against 7 state-of-the-art KV cache compression methods:
 | Method | Type | 2:1 | 3:1 | 4:1 | 5:1 | 6:1 | 7:1 | 8:1 |
 |--------|------|-----|-----|-----|-----|-----|-----|-----|
 | Dense | baseline | 8.80 | 8.80 | 8.80 | 8.80 | 8.80 | 8.80 | 8.80 |
-| LST | merging | -- | -- | -- | -- | -- | -- | -- |
+| LST | merging | 8.95 | -- | -- | -- | -- | -- | -- |
 | Mean Pooling | merging | 16.56 | 22.92 | 25.11 | 25.62 | 26.01 | 26.24 | 26.17 |
 | StreamingLLM | eviction | 26.30 | 26.30 | 26.30 | 26.30 | 26.30 | 26.30 | 26.30 |
 | WeightedKV | merging | 17.21 | 26.00 | 30.10 | 31.84 | 32.65 | 32.69 | 32.67 |
@@ -126,7 +126,7 @@ Multi-task long-context benchmark (F1 Score):
 
 *Note: TinyLlama performs poorly on LongBench even without compression (~2% F1). Larger models (Llama-2-7B+) are required for meaningful benchmark scores.*
 
-**Llama-2-7B (8:1 compression)**
+**Llama-2-7B (2:1 compression)**
 
 | Method | NarrativeQA | Qasper | HotpotQA | GovReport | TriviaQA | Avg |
 |--------|-------------|--------|----------|-----------|----------|-----|

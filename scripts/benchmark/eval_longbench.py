@@ -148,10 +148,9 @@ def load_sidecar(checkpoint_path: str, device: torch.device) -> SidecarPPL:
 
 def load_longbench_task(task_name: str, num_samples: int | None = None) -> list[dict]:
     """
-    Load a LongBench task from HuggingFace datasets.
+    Load a LongBench task from HuggingFace Hub (raw JSONL files).
 
-    Note: Requires datasets<=3.5.0 for trust_remote_code support.
-    Install with: pip install datasets==3.5.0
+    Downloads directly from the repo to avoid trust_remote_code issues.
 
     Args:
         task_name: Name of the task
@@ -160,15 +159,30 @@ def load_longbench_task(task_name: str, num_samples: int | None = None) -> list[
     Returns:
         List of samples with 'input', 'context', 'answers' fields
     """
-    try:
-        from datasets import load_dataset
+    import json
+    import os
+    import urllib.request
 
-        dataset = load_dataset(
-            "THUDM/LongBench",
-            task_name,
-            split="test",
-            trust_remote_code=True,
-        )
+    try:
+        # Download raw JSONL from HuggingFace Hub
+        url = f"https://huggingface.co/datasets/THUDM/LongBench/resolve/main/data/{task_name}.jsonl"
+        cache_dir = os.path.expanduser("~/.cache/longbench")
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_path = os.path.join(cache_dir, f"{task_name}.jsonl")
+
+        # Download if not cached
+        if not os.path.exists(cache_path):
+            logger.info(f"Downloading {task_name} from {url}")
+            urllib.request.urlretrieve(url, cache_path)
+
+        # Load JSONL
+        data = []
+        with open(cache_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    data.append(json.loads(line))
+
+        dataset = data
 
         samples = []
         for item in dataset:
