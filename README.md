@@ -42,14 +42,17 @@ Based on comprehensive analysis of accepted papers: [MiniCache](https://arxiv.or
 
 | Method | Type | 2:1 (50%) | 4:1 (25%) | 8:1 (12.5%) |
 |--------|------|-----------|-----------|-------------|
-| Dense (baseline) | — | 5.47 | 5.47 | 5.47 |
-| **LST (Ours)** | learned | **5.62** | — | — |
-| H2O | eviction | — | — | — |
-| StreamingLLM | window | — | — | — |
+| Dense (baseline) | — | 8.47 | 8.47 | 8.47 |
+| **LST (Ours)** | learned | **9.46** | **13.56** | **15.97** |
+| H2O | eviction | 15.81 | 28.37 | 31.80 |
+| StreamingLLM | window | 25.08 | 25.08 | 25.08 |
 | SnapKV | eviction | — | — | — |
 | PyramidKV | eviction | — | — | — |
-| TOVA | eviction | — | — | — |
-| Mean Pooling | merging | — | — | — |
+| TOVA | eviction | 15.87 | 28.68 | 31.86 |
+| Mean Pooling | merging | 15.49 | 23.64 | 24.85 |
+| CAM | merging | 15.98 | 28.9 | 32.31 |
+| KVmerger | merging | 24.19 | 22.32 | 20.63 |
+| Weightedkv | merging | 15.86 | 28.36 | 30.36 |
 
 *Reference: PALU achieves <0.1 PPL degradation at 50% compression; KVQuant achieves <0.1 PPL degradation with 3-bit quantization.*
 

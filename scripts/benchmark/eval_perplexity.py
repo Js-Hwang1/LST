@@ -9,7 +9,7 @@ Usage:
     python scripts/benchmark/eval_perplexity.py \\
         --model_name TinyLlama/TinyLlama-1.1B-Chat-v1.0 \\
         --checkpoint ./checkpoints/lst/final.pt \\
-        --methods dense,lst,mean,h2o,streaming,kvmerger,weightedkv,cam,tova
+        --methods dense,lst,mean,h2o,streaming,tova,snapkv,pyramidkv,kvmerger,weightedkv,cam
 
 Methods:
     Eviction-based:
@@ -17,6 +17,8 @@ Methods:
     - streaming: StreamingLLM (Xiao et al.) - evicts middle
     - h2o: Heavy-Hitter Oracle (Zhang et al.) - keeps high-attention tokens
     - tova: Token Omission Via Attention (Oren et al.) - greedy eviction
+    - snapkv: SnapKV (Li et al., NeurIPS 2024) - observation window compression
+    - pyramidkv: PyramidKV (Cai et al., 2024) - layer-wise dynamic compression
 
     Merging-based:
     - mean: Simple mean pooling baseline
@@ -48,6 +50,10 @@ from src.baselines import (
     H2OConfig,
     KVMerger,
     KVMergerConfig,
+    PyramidKV,
+    PyramidKVConfig,
+    SnapKV,
+    SnapKVConfig,
     StreamingLLM,
     StreamingLLMConfig,
     TOVAConfig,
@@ -237,6 +243,12 @@ def compress_cache_with_baseline(
     elif method_name == "cam":
         config = CaMConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
         method = CaM(config)
+    elif method_name == "snapkv":
+        config = SnapKVConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
+        method = SnapKV(config)
+    elif method_name == "pyramidkv":
+        config = PyramidKVConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
+        method = PyramidKV(config)
     else:
         raise ValueError(f"Unknown method: {method_name}")
 
@@ -313,7 +325,7 @@ def evaluate_ppl(
             compressed = compress_cache_lst(cache, sidecar, window_size, num_sink, num_recent)
         elif method == "mean":
             compressed = compress_cache_mean(cache, window_size, num_sink, num_recent)
-        elif method in ["h2o", "streaming", "tova", "kvmerger", "weightedkv", "cam"]:
+        elif method in ["h2o", "streaming", "tova", "snapkv", "pyramidkv", "kvmerger", "weightedkv", "cam"]:
             compressed = compress_cache_with_baseline(cache, method, budget, num_sink, num_recent)
         else:
             raise ValueError(f"Unknown method: {method}")
@@ -349,7 +361,7 @@ def main():
     parser.add_argument(
         "--methods",
         type=str,
-        default="dense,lst,mean,h2o,streaming,tova,kvmerger,weightedkv,cam",
+        default="dense,lst,mean,h2o,streaming,tova,snapkv,pyramidkv,kvmerger,weightedkv,cam",
         help="Comma-separated list of methods",
     )
     parser.add_argument("--num_samples", type=int, default=100, help="Number of samples")
@@ -429,6 +441,8 @@ def main():
         "streaming": "eviction",
         "h2o": "eviction",
         "tova": "eviction",
+        "snapkv": "eviction",
+        "pyramidkv": "eviction",
         "mean": "merging",
         "lst": "merging",
         "kvmerger": "merging",
