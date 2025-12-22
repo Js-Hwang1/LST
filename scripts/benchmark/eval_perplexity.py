@@ -365,6 +365,13 @@ def main():
         help="Comma-separated list of methods",
     )
     parser.add_argument("--num_samples", type=int, default=100, help="Number of samples")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="wikitext-2",
+        choices=["wikitext-2", "wikitext-103"],
+        help="Dataset for evaluation (wikitext-2 for paper comparison, wikitext-103 for robustness)",
+    )
     parser.add_argument("--window_size", type=int, default=8, help="Compression window size")
     parser.add_argument("--num_sink", type=int, default=4, help="Number of sink tokens")
     parser.add_argument("--num_recent", type=int, default=8, help="Number of recent tokens")
@@ -390,7 +397,13 @@ def main():
             sidecar = load_sidecar(args.checkpoint, device)
 
     # Load evaluation data
-    dataset = load_dataset("wikitext", "wikitext-103-v1", split="test")
+    dataset_map = {
+        "wikitext-2": "wikitext-2-v1",
+        "wikitext-103": "wikitext-103-v1",
+    }
+    dataset_name = dataset_map[args.dataset]
+    logger.info(f"Loading dataset: {args.dataset} ({dataset_name})")
+    dataset = load_dataset("wikitext", dataset_name, split="test")
     dataset = dataset.shuffle(seed=args.seed)
 
     samples = []
@@ -428,8 +441,9 @@ def main():
     print("PERPLEXITY EVALUATION RESULTS")
     print("=" * 60)
     print(f"Model: {args.model_name}")
+    print(f"Dataset: {args.dataset}")
     print(f"Samples: {args.num_samples}")
-    print(f"Window size: {args.window_size} (8:1 compression)")
+    print(f"Window size: {args.window_size} ({args.window_size}:1 compression)")
     print(f"Sink tokens: {args.num_sink}")
     print(f"Recent tokens: {args.num_recent}")
     print("-" * 60)
