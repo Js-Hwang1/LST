@@ -239,14 +239,37 @@ def evaluate_with_compression(
         try:
             # Get task
             task_dict = lm_tasks.get_task_dict([task_name], task_manager)
+            if task_name not in task_dict or task_dict[task_name] is None:
+                logger.warning(f"Task {task_name} not found in task_dict, skipping")
+                continue
             task = task_dict[task_name]
 
-            # Get test instances
-            if hasattr(task, "test_docs"):
-                docs = list(task.test_docs())
-            elif hasattr(task, "validation_docs"):
-                docs = list(task.validation_docs())
-            else:
+            # Get test instances - handle different lm_eval versions
+            docs = None
+            try:
+                if hasattr(task, "test_docs") and callable(task.test_docs):
+                    test_docs = task.test_docs()
+                    if test_docs is not None:
+                        docs = list(test_docs)
+
+                if docs is None and hasattr(task, "validation_docs") and callable(task.validation_docs):
+                    val_docs = task.validation_docs()
+                    if val_docs is not None:
+                        docs = list(val_docs)
+
+                # Try alternative API for newer lm_eval versions
+                if docs is None and hasattr(task, "dataset"):
+                    dataset = task.dataset
+                    if dataset is not None:
+                        if "test" in dataset:
+                            docs = list(dataset["test"])
+                        elif "validation" in dataset:
+                            docs = list(dataset["validation"])
+            except Exception as doc_err:
+                logger.warning(f"Error getting docs for {task_name}: {doc_err}")
+                docs = None
+
+            if docs is None or len(docs) == 0:
                 logger.warning(f"Task {task_name} has no test/validation docs, skipping")
                 continue
 

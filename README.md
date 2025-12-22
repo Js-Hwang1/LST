@@ -48,30 +48,21 @@ WikiText-103 with numsamples == 100
 | **LST (Ours)** | learned | **9.46** | **13.56** | **15.97** |
 | H2O | eviction | 15.81 | 28.37 | 31.80 |
 | StreamingLLM | window | 25.08 | 25.08 | 25.08 |
-| SnapKV | eviction | 14.07 | 10.97 | 8.47 |
-| PyramidKV | eviction | 10.54 | 21.37 | 29.35 |
 | TOVA | eviction | 15.87 | 28.68 | 31.86 |
 | Mean Pooling | merging | 15.49 | 23.64 | 24.85 |
 | CAM | merging | 15.98 | 28.9 | 32.31 |
-| KVmerger | merging | 24.19 | 22.32 | 20.63 |
-| Weightedkv | merging | 15.86 | 28.36 | 30.36 |
-
 
 WikiText-2 with numsamples == 100
 
 | Method | Type | 2:1 (50%) | 4:1 (25%) | 8:1 (12.5%) |
 |--------|------|-----------|-----------|-------------|
-| Dense (baseline) | — | 8.47 | 8.47 | 8.47 |
-| **LST (Ours)** | learned | **9.46** | **13.56** | **15.97** |
-| H2O | eviction | 15.81 | 28.37 | 31.80 |
-| StreamingLLM | window | 25.08 | 25.08 | 25.08 |
-| SnapKV | eviction | 14.07 | 10.97 | 8.47 |
-| PyramidKV | eviction | 10.54 | 21.37 | 29.35 |
-| TOVA | eviction | 15.87 | 28.68 | 31.86 |
-| Mean Pooling | merging | 15.49 | 23.64 | 24.85 |
-| CAM | merging | 15.98 | 28.9 | 32.31 |
-| KVmerger | merging | 24.19 | 22.32 | 20.63 |
-| Weightedkv | merging | 15.86 | 28.36 | 30.36 |
+| Dense (baseline) | — | 25.15 | 25.15 | 25.15 |
+| **LST (Ours)** | learned | **20.48** | **35.52** | **40.65** |
+| H2O | eviction | 45.62 | 69.42 | 73.03 |
+| StreamingLLM | window | 60.85 | 60.85 | 60.85 |
+| TOVA | eviction | 45.74 | 70.31 | 73.99 |
+| Mean Pooling | merging | 42.82 | 58.41 | 60.59 |
+| CAM | merging | 45.91 | 70.74 | 74.67 |
 
 *Reference: PALU achieves <0.1 PPL degradation at 50% compression; KVQuant achieves <0.1 PPL degradation with 3-bit quantization.*
 
