@@ -31,8 +31,8 @@ from .base import CompressionConfig, CompressionMethod
 class KVMergerConfig(CompressionConfig):
     """KVMerger-specific configuration."""
 
-    # Similarity threshold for merging (paper uses 0.75)
-    similarity_threshold: float = 0.75
+    # Similarity threshold for merging (paper uses 0.8)
+    similarity_threshold: float = 0.8
 
     # Minimum cluster size for merging
     min_cluster_size: int = 2
