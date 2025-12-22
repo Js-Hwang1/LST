@@ -148,9 +148,9 @@ def load_sidecar(checkpoint_path: str, device: torch.device) -> SidecarPPL:
 
 def load_longbench_task(task_name: str, num_samples: int | None = None) -> list[dict]:
     """
-    Load a LongBench task from HuggingFace Hub (raw JSONL files).
+    Load a LongBench task from HuggingFace Hub.
 
-    Downloads directly from the repo to avoid trust_remote_code issues.
+    Downloads data.zip and extracts JSONL files.
 
     Args:
         task_name: Name of the task
@@ -162,22 +162,37 @@ def load_longbench_task(task_name: str, num_samples: int | None = None) -> list[
     import json
     import os
     import urllib.request
+    import zipfile
 
     try:
-        # Download raw JSONL from HuggingFace Hub
-        url = f"https://huggingface.co/datasets/THUDM/LongBench/resolve/main/data/{task_name}.jsonl"
         cache_dir = os.path.expanduser("~/.cache/longbench")
         os.makedirs(cache_dir, exist_ok=True)
-        cache_path = os.path.join(cache_dir, f"{task_name}.jsonl")
+        zip_path = os.path.join(cache_dir, "data.zip")
+        extract_dir = os.path.join(cache_dir, "data")
 
-        # Download if not cached
-        if not os.path.exists(cache_path):
-            logger.info(f"Downloading {task_name} from {url}")
-            urllib.request.urlretrieve(url, cache_path)
+        # Download zip if not extracted yet
+        if not os.path.exists(extract_dir):
+            if not os.path.exists(zip_path):
+                url = "https://huggingface.co/datasets/THUDM/LongBench/resolve/main/data.zip"
+                logger.info(f"Downloading LongBench data.zip (~114MB)...")
+                urllib.request.urlretrieve(url, zip_path)
+
+            # Extract
+            logger.info("Extracting data.zip...")
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(cache_dir)
+
+        # Find the jsonl file
+        jsonl_path = os.path.join(extract_dir, f"{task_name}.jsonl")
+        if not os.path.exists(jsonl_path):
+            # List available files for debugging
+            available = [f for f in os.listdir(extract_dir) if f.endswith(".jsonl")] if os.path.exists(extract_dir) else []
+            logger.error(f"Task {task_name}.jsonl not found. Available: {available[:10]}...")
+            return []
 
         # Load JSONL
         data = []
-        with open(cache_path, "r", encoding="utf-8") as f:
+        with open(jsonl_path, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
                     data.append(json.loads(line))
