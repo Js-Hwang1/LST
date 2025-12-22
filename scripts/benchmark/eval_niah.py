@@ -108,6 +108,10 @@ def load_sidecar(checkpoint_path: str, device: torch.device) -> SidecarPPL:
     sidecar.load_state_dict(ckpt["model_state_dict"])
     sidecar.eval()
 
+    # Match model dtype (bfloat16 on CUDA)
+    if torch.cuda.is_available():
+        sidecar = sidecar.to(torch.bfloat16)
+
     return sidecar
 
 
@@ -321,6 +325,7 @@ def evaluate_retrieval(
     question: str,
     expected_answer: str,
     cache: list[tuple[torch.Tensor, torch.Tensor]],
+    context_len: int,
     max_new_tokens: int = 20,
 ) -> tuple[bool, str]:
     """
@@ -333,11 +338,14 @@ def evaluate_retrieval(
         question: Question to ask
         expected_answer: Expected answer
         cache: Compressed KV cache
+        context_len: Length of context tokens (for cache_position)
         max_new_tokens: Max tokens to generate
 
     Returns:
         Tuple of (is_correct, generated_answer)
     """
+    from transformers.cache_utils import DynamicCache
+
     device = next(model.parameters()).device
 
     # Tokenize question
@@ -347,19 +355,50 @@ def evaluate_retrieval(
         add_special_tokens=False,
     ).input_ids.to(device)
 
-    # Generate with compressed cache
+    # Convert cache list to DynamicCache for newer transformers
+    past_kv = DynamicCache()
+    for k, v in cache:
+        past_kv.update(k, v, layer_idx=len(past_kv))
+
+    # Get cache length from the actual compressed cache
+    cache_len = cache[0][0].shape[2] if cache else 0
+
+    # Manual autoregressive generation (works better with external cache)
+    all_tokens = question_tokens.clone()
+
     with torch.no_grad():
-        generated = model.generate(
-            question_tokens,
-            past_key_values=tuple(cache),
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=tokenizer.pad_token_id,
-        )
+        # First, process all question tokens
+        for i in range(question_tokens.shape[1]):
+            pos = cache_len + i
+            position_ids = torch.tensor([[pos]], device=device)
+            out = model(
+                question_tokens[:, i : i + 1],
+                past_key_values=past_kv,
+                position_ids=position_ids,
+                use_cache=True,
+            )
+            past_kv = out.past_key_values
+
+        # Then generate new tokens
+        for _ in range(max_new_tokens):
+            pos = cache_len + all_tokens.shape[1]
+            position_ids = torch.tensor([[pos]], device=device)
+            out = model(
+                all_tokens[:, -1:],
+                past_key_values=past_kv,
+                position_ids=position_ids,
+                use_cache=True,
+            )
+            past_kv = out.past_key_values
+            next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            all_tokens = torch.cat([all_tokens, next_token], dim=1)
+
+            if next_token.item() == tokenizer.eos_token_id:
+                break
 
     # Decode response
     response = tokenizer.decode(
-        generated[0, question_tokens.shape[1] :],
+        all_tokens[0, question_tokens.shape[1] :],
         skip_special_tokens=True,
     ).strip()
 
@@ -437,7 +476,16 @@ def evaluate_niah(
                 # Get cache from context
                 with torch.no_grad():
                     outputs = model(context_tokens, use_cache=True)
-                    cache = list(outputs.past_key_values)
+                    past_kv = outputs.past_key_values
+
+                    # Convert DynamicCache to list of tuples if needed
+                    if hasattr(past_kv, "key_cache"):
+                        cache = [
+                            (past_kv.key_cache[i], past_kv.value_cache[i])
+                            for i in range(len(past_kv.key_cache))
+                        ]
+                    else:
+                        cache = list(past_kv)
 
                 # Compute budget
                 prefix_len = context_tokens.shape[1]
@@ -459,7 +507,8 @@ def evaluate_niah(
 
                 # Evaluate retrieval
                 is_correct, response = evaluate_retrieval(
-                    model, tokenizer, context, QUESTION_TEMPLATE, expected, compressed
+                    model, tokenizer, context, QUESTION_TEMPLATE, expected, compressed,
+                    context_len=prefix_len,
                 )
 
                 if is_correct:

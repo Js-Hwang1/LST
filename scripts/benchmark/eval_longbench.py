@@ -139,12 +139,19 @@ def load_sidecar(checkpoint_path: str, device: torch.device) -> SidecarPPL:
     sidecar.load_state_dict(ckpt["model_state_dict"])
     sidecar.eval()
 
+    # Match model dtype (bfloat16 on CUDA)
+    if torch.cuda.is_available():
+        sidecar = sidecar.to(torch.bfloat16)
+
     return sidecar
 
 
 def load_longbench_task(task_name: str, num_samples: int | None = None) -> list[dict]:
     """
     Load a LongBench task from HuggingFace datasets.
+
+    Note: Requires datasets<=3.5.0 for trust_remote_code support.
+    Install with: pip install datasets==3.5.0
 
     Args:
         task_name: Name of the task
@@ -170,15 +177,16 @@ def load_longbench_task(task_name: str, num_samples: int | None = None) -> list[
                 "context": item.get("context", ""),
                 "answers": item.get("answers", []),
             }
-            # Some tasks have 'question' instead of 'input'
-            if not sample["input"] and "question" in item:
-                sample["input"] = item["question"]
+            # Ensure answers is a list
+            if isinstance(sample["answers"], str):
+                sample["answers"] = [sample["answers"]]
 
             samples.append(sample)
 
             if num_samples and len(samples) >= num_samples:
                 break
 
+        logger.info(f"Loaded {len(samples)} samples for {task_name}")
         return samples
 
     except Exception as e:
@@ -494,7 +502,16 @@ def evaluate_sample(
 
     with torch.no_grad():
         outputs = model(context_ids, use_cache=True)
-        cache = list(outputs.past_key_values)
+        past_kv = outputs.past_key_values
+
+        # Convert DynamicCache to list of tuples if needed
+        if hasattr(past_kv, "key_cache"):
+            cache = [
+                (past_kv.key_cache[i], past_kv.value_cache[i])
+                for i in range(len(past_kv.key_cache))
+            ]
+        else:
+            cache = list(past_kv)
 
     # Compute budget
     budget = num_sink + num_recent + (context_len - num_sink - num_recent) // window_size
@@ -509,21 +526,55 @@ def evaluate_sample(
     else:
         compressed = compress_cache_with_baseline(cache, method, budget, num_sink, num_recent)
 
-    # Generate with compressed cache
+    # Generate with compressed cache using manual autoregressive generation
+    from transformers.cache_utils import DynamicCache
+
     max_new_tokens = task_config.get("max_gen", 64)
 
+    # Convert cache list to DynamicCache for newer transformers
+    past_kv = DynamicCache()
+    for k, v in compressed:
+        past_kv.update(k, v, layer_idx=len(past_kv))
+
+    # Get cache length from the actual compressed cache
+    cache_len = compressed[0][0].shape[2] if compressed else 0
+
+    # Manual autoregressive generation (works better with external cache)
+    all_tokens = question_ids.clone()
+
     with torch.no_grad():
-        generated = model.generate(
-            question_ids,
-            past_key_values=tuple(compressed),
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=tokenizer.pad_token_id,
-        )
+        # First, process all question tokens
+        for i in range(question_ids.shape[1]):
+            pos = cache_len + i
+            position_ids = torch.tensor([[pos]], device=device)
+            out = model(
+                question_ids[:, i : i + 1],
+                past_key_values=past_kv,
+                position_ids=position_ids,
+                use_cache=True,
+            )
+            past_kv = out.past_key_values
+
+        # Then generate new tokens
+        for _ in range(max_new_tokens):
+            pos = cache_len + all_tokens.shape[1]
+            position_ids = torch.tensor([[pos]], device=device)
+            out = model(
+                all_tokens[:, -1:],
+                past_key_values=past_kv,
+                position_ids=position_ids,
+                use_cache=True,
+            )
+            past_kv = out.past_key_values
+            next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            all_tokens = torch.cat([all_tokens, next_token], dim=1)
+
+            if next_token.item() == tokenizer.eos_token_id:
+                break
 
     # Decode response
     response = tokenizer.decode(
-        generated[0, question_ids.shape[1] :],
+        all_tokens[0, question_ids.shape[1] :],
         skip_special_tokens=True,
     ).strip()
 
