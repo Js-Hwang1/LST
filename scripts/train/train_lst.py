@@ -14,7 +14,7 @@ Usage:
 For Llama-2-7B:
     python scripts/train/train_lst.py \\
         --model_name meta-llama/Llama-2-7b-hf \\
-        --max_steps 2000 \\
+        --max_steps 1000 \\
         --batch_size 256 \\
         --output_dir ./checkpoints/llama2_lst
 
