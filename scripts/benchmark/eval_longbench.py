@@ -66,6 +66,10 @@ from src.baselines import (
     H2OConfig,
     KVMerger,
     KVMergerConfig,
+    PyramidKV,
+    PyramidKVConfig,
+    SnapKV,
+    SnapKVConfig,
     StreamingLLM,
     StreamingLLMConfig,
     TOVAConfig,
@@ -351,6 +355,12 @@ def compress_cache_with_baseline(
     elif method_name == "cam":
         config = CaMConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
         method = CaM(config)
+    elif method_name == "snapkv":
+        config = SnapKVConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
+        method = SnapKV(config)
+    elif method_name == "pyramidkv":
+        config = PyramidKVConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
+        method = PyramidKV(config)
     else:
         raise ValueError(f"Unknown method: {method_name}")
 
@@ -699,8 +709,8 @@ def main():
     parser.add_argument(
         "--methods",
         type=str,
-        default="dense,lst,mean,h2o,streaming,tova,kvmerger,weightedkv,cam",
-        help="Comma-separated list of methods",
+        default="dense,lst,mean,h2o,streaming,tova,snapkv,pyramidkv",
+        help="Comma-separated list of methods (dense,lst,mean,h2o,streaming,tova,snapkv,pyramidkv,cam,weightedkv)",
     )
     parser.add_argument(
         "--tasks",
