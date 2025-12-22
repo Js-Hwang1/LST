@@ -509,20 +509,31 @@ def evaluate_sample(
     """
     device = next(model.parameters()).device
 
-    # Build prompt
+    # Build prompt with proper truncation that preserves the question
     context = sample["context"]
     question = sample["input"]
 
-    prompt = f"{context}\n\nQuestion: {question}\nAnswer:"
+    # Tokenize question suffix first to reserve space for it
+    question_suffix = f"\n\nQuestion: {question}\nAnswer:"
+    question_tokens = tokenizer(question_suffix, add_special_tokens=False, return_tensors="pt")
+    question_len = question_tokens.input_ids.shape[1]
 
-    # Tokenize and truncate
-    tokens = tokenizer(
-        prompt,
+    # Reserve tokens for question (with some buffer for generation)
+    context_budget = max_context_length - question_len - 10
+
+    # Tokenize and truncate context only
+    context_tokens = tokenizer(
+        context,
         return_tensors="pt",
         truncation=True,
-        max_length=max_context_length,
+        max_length=context_budget,
+        add_special_tokens=True,  # Include BOS token
     )
-    input_ids = tokens.input_ids.to(device)
+
+    # Concatenate: [context_tokens] + [question_tokens]
+    input_ids = torch.cat(
+        [context_tokens.input_ids, question_tokens.input_ids], dim=1
+    ).to(device)
 
     # Get cache from context (all but last few tokens)
     context_len = max(1, input_ids.shape[1] - 20)
