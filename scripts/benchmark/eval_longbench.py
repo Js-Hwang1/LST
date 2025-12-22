@@ -543,17 +543,16 @@ def evaluate_sample(
     all_tokens = question_ids.clone()
 
     with torch.no_grad():
-        # First, process all question tokens
-        for i in range(question_ids.shape[1]):
-            pos = cache_len + i
-            position_ids = torch.tensor([[pos]], device=device)
-            out = model(
-                question_ids[:, i : i + 1],
-                past_key_values=past_kv,
-                position_ids=position_ids,
-                use_cache=True,
-            )
-            past_kv = out.past_key_values
+        # Process all question tokens in ONE forward pass (not token-by-token)
+        q_len = question_ids.shape[1]
+        position_ids = torch.arange(cache_len, cache_len + q_len, device=device).unsqueeze(0)
+        out = model(
+            question_ids,
+            past_key_values=past_kv,
+            position_ids=position_ids,
+            use_cache=True,
+        )
+        past_kv = out.past_key_values
 
         # Then generate new tokens
         for _ in range(max_new_tokens):

@@ -21,8 +21,11 @@ The benchmark:
 """
 
 import argparse
+import json
 import logging
+import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -125,6 +128,11 @@ def generate_haystack(
     """
     Generate a haystack with a needle inserted at specified depth.
 
+    Following the standard NIAH methodology (gkamradt/LLMTest_NeedleInAHaystack):
+    - Depth 0.0 = needle at the very beginning
+    - Depth 1.0 = needle at the very end
+    - Needle is NEVER trimmed (we build haystack around it)
+
     Args:
         tokenizer: Tokenizer for length estimation
         target_length: Target length in tokens
@@ -138,32 +146,73 @@ def generate_haystack(
     rng = np.random.RandomState(seed)
 
     needle = NEEDLE_TEMPLATE.format(number=magic_number)
+    needle_tokens = len(tokenizer.encode(needle))
 
-    # Build haystack
-    sentences = []
-    current_length = 0
+    # Calculate how many tokens we need for haystack (excluding needle)
+    haystack_budget = target_length - needle_tokens - 10  # small buffer
 
-    while current_length < target_length * 1.5:  # Overshoot then trim
+    # Build pre-needle and post-needle haystack based on depth
+    # depth=0.0 means needle at start (0% pre, 100% post)
+    # depth=1.0 means needle at end (100% pre, 0% post)
+    pre_budget = int(haystack_budget * needle_depth)
+    post_budget = haystack_budget - pre_budget
+
+    # Build pre-needle text
+    pre_sentences = []
+    pre_length = 0
+    while pre_length < pre_budget:
         sentence = rng.choice(HAYSTACK_SENTENCES)
-        sentences.append(sentence)
-        current_length += len(tokenizer.encode(sentence))
+        sentence_len = len(tokenizer.encode(sentence))
+        if pre_length + sentence_len > pre_budget + 20:  # small overflow ok
+            break
+        pre_sentences.append(sentence)
+        pre_length += sentence_len
 
-    # Find insertion point
-    total_sentences = len(sentences)
-    insert_idx = int(total_sentences * needle_depth)
-    insert_idx = max(0, min(insert_idx, total_sentences - 1))
+    # Build post-needle text
+    post_sentences = []
+    post_length = 0
+    while post_length < post_budget:
+        sentence = rng.choice(HAYSTACK_SENTENCES)
+        sentence_len = len(tokenizer.encode(sentence))
+        if post_length + sentence_len > post_budget + 20:  # small overflow ok
+            break
+        post_sentences.append(sentence)
+        post_length += sentence_len
 
-    # Insert needle
-    sentences.insert(insert_idx, needle)
+    # Combine: pre + needle + post
+    pre_text = " ".join(pre_sentences)
+    post_text = " ".join(post_sentences)
 
-    # Join and trim to target length
-    full_text = " ".join(sentences)
+    if pre_text and post_text:
+        full_text = f"{pre_text} {needle} {post_text}"
+    elif pre_text:
+        full_text = f"{pre_text} {needle}"
+    elif post_text:
+        full_text = f"{needle} {post_text}"
+    else:
+        full_text = needle
+
+    # Final trim if needed (trim from END, never touching needle)
     tokens = tokenizer.encode(full_text)
-
     if len(tokens) > target_length:
-        # Trim from end, keeping needle
-        tokens = tokens[:target_length]
-        full_text = tokenizer.decode(tokens, skip_special_tokens=True)
+        # Find needle position in tokens to ensure we don't cut it
+        needle_start = full_text.find(needle)
+        needle_end = needle_start + len(needle)
+
+        # Only trim post-needle portion
+        pre_needle_text = full_text[:needle_end]
+        post_needle_text = full_text[needle_end:]
+
+        # Calculate how much to trim from post
+        pre_tokens = len(tokenizer.encode(pre_needle_text))
+        available_post = target_length - pre_tokens
+        if available_post > 0:
+            post_tokens = tokenizer.encode(post_needle_text)[:available_post]
+            post_needle_text = tokenizer.decode(post_tokens, skip_special_tokens=True)
+            full_text = pre_needle_text + post_needle_text
+        else:
+            # Edge case: even needle alone exceeds target
+            full_text = pre_needle_text
 
     return full_text, str(magic_number)
 
@@ -367,17 +416,16 @@ def evaluate_retrieval(
     all_tokens = question_tokens.clone()
 
     with torch.no_grad():
-        # First, process all question tokens
-        for i in range(question_tokens.shape[1]):
-            pos = cache_len + i
-            position_ids = torch.tensor([[pos]], device=device)
-            out = model(
-                question_tokens[:, i : i + 1],
-                past_key_values=past_kv,
-                position_ids=position_ids,
-                use_cache=True,
-            )
-            past_kv = out.past_key_values
+        # Process all question tokens in ONE forward pass (not token-by-token)
+        q_len = question_tokens.shape[1]
+        position_ids = torch.arange(cache_len, cache_len + q_len, device=device).unsqueeze(0)
+        out = model(
+            question_tokens,
+            past_key_values=past_kv,
+            position_ids=position_ids,
+            use_cache=True,
+        )
+        past_kv = out.past_key_values
 
         # Then generate new tokens
         for _ in range(max_new_tokens):
@@ -402,8 +450,19 @@ def evaluate_retrieval(
         skip_special_tokens=True,
     ).strip()
 
-    # Check if answer is present
-    is_correct = expected_answer in response
+    # Check if answer is correct using multiple matching strategies
+    # 1. Exact substring match (standard)
+    # 2. Extract first number from response and compare (robust to formatting)
+    is_correct = False
+
+    # Method 1: Direct substring match
+    if expected_answer in response:
+        is_correct = True
+    else:
+        # Method 2: Extract numbers from response and check
+        numbers_in_response = re.findall(r'\b\d{4}\b', response)  # 4-digit numbers
+        if expected_answer in numbers_in_response:
+            is_correct = True
 
     return is_correct, response
 
@@ -530,38 +589,69 @@ def evaluate_niah(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate on Needle-in-a-Haystack")
+    parser = argparse.ArgumentParser(
+        description="Needle-in-a-Haystack Evaluation (following gkamradt methodology)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Quick test (5 samples)
+  python eval_niah.py --methods dense,mean --num_samples 5
+
+  # ICML-quality evaluation (50 samples per config)
+  python eval_niah.py --methods dense,lst,h2o,streaming --num_samples 50 \\
+      --context_lengths 1024,2048,4096 --output results/niah_results.json
+
+  # Single compression ratio sweep
+  python eval_niah.py --window_size 4 --num_samples 20 --output results/niah_4x.json
+        """,
+    )
 
     parser.add_argument(
         "--model_name",
         type=str,
         default="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        help="Model name",
+        help="HuggingFace model name",
     )
     parser.add_argument("--checkpoint", type=str, default=None, help="LST checkpoint path")
     parser.add_argument(
         "--methods",
         type=str,
         default="dense,lst,mean,h2o,streaming,tova,kvmerger,weightedkv,cam",
-        help="Comma-separated list of methods",
+        help="Comma-separated methods: dense,lst,mean,h2o,streaming,tova,kvmerger,weightedkv,cam",
     )
     parser.add_argument(
         "--context_lengths",
         type=str,
-        default="256,512,1024",
-        help="Comma-separated context lengths",
+        default="1024,2048,4096",
+        help="Comma-separated context lengths (standard: 1024,2048,4096,8192)",
     )
     parser.add_argument(
         "--depths",
         type=str,
         default="0.0,0.25,0.5,0.75,1.0",
-        help="Comma-separated needle depths",
+        help="Comma-separated needle depths (0.0=start, 1.0=end)",
     )
-    parser.add_argument("--num_samples", type=int, default=5, help="Samples per config")
-    parser.add_argument("--window_size", type=int, default=8, help="Compression window size")
-    parser.add_argument("--num_sink", type=int, default=4, help="Number of sink tokens")
-    parser.add_argument("--num_recent", type=int, default=8, help="Number of recent tokens")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=10,
+        help="Samples per (length, depth) config. ICML standard: 50-100",
+    )
+    parser.add_argument(
+        "--window_size",
+        type=int,
+        default=8,
+        help="Compression window size (e.g., 2=2:1, 4=4:1, 8=8:1)",
+    )
+    parser.add_argument("--num_sink", type=int, default=4, help="Sink tokens to preserve")
+    parser.add_argument("--num_recent", type=int, default=8, help="Recent tokens to preserve")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Output JSON file for results (for reproducibility)",
+    )
 
     args = parser.parse_args()
 
@@ -651,6 +741,47 @@ def main():
             print(row)
 
     print("\n" + "=" * 70)
+
+    # Save results to JSON for reproducibility
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Convert tuple keys to strings for JSON serialization
+        json_results = {}
+        for method, result in all_results.items():
+            json_results[method] = {
+                "overall_accuracy": result.get("overall_accuracy", 0),
+                "total_correct": result.get("total_correct", 0),
+                "total_samples": result.get("total_samples", 0),
+            }
+            if "per_config" in result:
+                json_results[method]["per_config"] = {
+                    f"{length}_{depth}": acc
+                    for (length, depth), acc in result["per_config"].items()
+                }
+            if "error" in result:
+                json_results[method]["error"] = result["error"]
+
+        output_data = {
+            "metadata": {
+                "model": args.model_name,
+                "window_size": args.window_size,
+                "compression_ratio": f"{args.window_size}:1",
+                "context_lengths": context_lengths,
+                "depths": depths,
+                "num_samples": args.num_samples,
+                "num_sink": args.num_sink,
+                "num_recent": args.num_recent,
+                "seed": args.seed,
+                "timestamp": datetime.now().isoformat(),
+            },
+            "results": json_results,
+        }
+
+        with open(output_path, "w") as f:
+            json.dump(output_data, f, indent=2)
+        logger.info(f"Results saved to {output_path}")
 
 
 if __name__ == "__main__":
