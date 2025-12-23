@@ -317,8 +317,12 @@ class LSTTrainer:
             )
             all_losses.append(loss_dict)
 
-        # Average losses
+        # Average losses (handle empty validation set)
         avg_losses = {}
+        if not all_losses:
+            logger.warning("No validation samples processed")
+            return {"val/loss": 0.0}
+
         for key in all_losses[0]:
             avg_losses[f"val/{key}"] = np.mean([loss_d[key] for loss_d in all_losses])
 

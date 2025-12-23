@@ -59,15 +59,14 @@ def load_model(model_name: str, device: torch.device):
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+        dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         device_map="auto",
     )
     model.eval()
 
-    # Get d_head
-    if hasattr(model.config, "head_dim"):
-        d_head = model.config.head_dim
-    else:
+    # Get d_head (handle cases where head_dim exists but is None)
+    d_head = getattr(model.config, "head_dim", None)
+    if d_head is None:
         d_head = model.config.hidden_size // model.config.num_attention_heads
 
     logger.info(f"Model head dimension: {d_head}")
