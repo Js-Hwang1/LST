@@ -489,11 +489,32 @@ def compute_rouge_l(prediction: str, ground_truths: list[str]) -> float:
 
 
 def compute_accuracy(prediction: str, ground_truths: list[str]) -> float:
-    """Compute exact match accuracy."""
+    """
+    Compute accuracy for classification tasks.
+
+    For classification (e.g., TREC), checks if the ground truth label
+    appears in the model's response, since models often output
+    "The answer is DESCRIPTION" rather than just "DESCRIPTION".
+    """
     pred_norm = normalize_answer(prediction)
+
     for gt in ground_truths:
-        if normalize_answer(gt) == pred_norm:
+        gt_norm = normalize_answer(gt)
+
+        # Exact match
+        if gt_norm == pred_norm:
             return 1.0
+
+        # Check if ground truth label is contained in prediction
+        # (handles "The type is DESCRIPTION" matching "DESCRIPTION")
+        if gt_norm in pred_norm:
+            return 1.0
+
+        # Check if prediction is contained in ground truth
+        # (handles abbreviated responses)
+        if pred_norm and pred_norm in gt_norm:
+            return 1.0
+
     return 0.0
 
 
@@ -619,13 +640,22 @@ def evaluate_sample(
     # Get cache length from the actual compressed cache
     cache_len = compressed[0][0].shape[2] if compressed else 0
 
+    # Ensure cache_len is valid (must be non-negative)
+    if cache_len < 0:
+        raise ValueError(f"Invalid cache_len: {cache_len}")
+
     # Manual autoregressive generation (works better with external cache)
     all_tokens = question_ids.clone()
 
     with torch.no_grad():
         # Process all question tokens in ONE forward pass (not token-by-token)
         q_len = question_ids.shape[1]
-        position_ids = torch.arange(cache_len, cache_len + q_len, device=device).unsqueeze(0)
+
+        # Ensure position_ids are non-negative (use long dtype for large positions)
+        position_ids = torch.arange(
+            cache_len, cache_len + q_len, device=device, dtype=torch.long
+        ).unsqueeze(0)
+
         out = model(
             question_ids,
             past_key_values=past_kv,
@@ -637,7 +667,8 @@ def evaluate_sample(
         # Then generate new tokens
         for _ in range(max_new_tokens):
             pos = cache_len + all_tokens.shape[1]
-            position_ids = torch.tensor([[pos]], device=device)
+            # Use long dtype to avoid overflow issues with large position values
+            position_ids = torch.tensor([[pos]], device=device, dtype=torch.long)
             out = model(
                 all_tokens[:, -1:],
                 past_key_values=past_kv,
