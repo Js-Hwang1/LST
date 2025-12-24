@@ -128,13 +128,26 @@ def load_model(model_name: str, device: torch.device):
     return model, tokenizer
 
 
-def load_sidecar(checkpoint_path: str, device: torch.device) -> SidecarPPL:
+def load_sidecar(
+    checkpoint_path: str, device: torch.device, model_config=None
+) -> SidecarPPL:
     """Load trained sidecar from checkpoint."""
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = ckpt["config"]
 
+    # Handle d_head being None in older checkpoints
+    d_head = config.get("d_head")
+    if d_head is None and model_config is not None:
+        d_head = getattr(model_config, "head_dim", None)
+        if d_head is None:
+            d_head = model_config.hidden_size // model_config.num_attention_heads
+        logger.info(f"Computed d_head from model config: {d_head}")
+
+    if d_head is None:
+        raise ValueError("d_head is None and no model_config provided to compute it")
+
     sidecar = SidecarPPL(
-        d_head=config["d_head"],
+        d_head=d_head,
         window_size=config["window_size"],
         hidden_dim=config["hidden_dim"],
         num_encoder_layers=config["num_encoder_layers"],
@@ -751,7 +764,7 @@ def main():
             logger.warning("No checkpoint provided for LST, skipping")
             methods.remove("lst")
         else:
-            sidecar = load_sidecar(args.checkpoint, device)
+            sidecar = load_sidecar(args.checkpoint, device, model.config)
 
     # Evaluate
     all_results = {}
