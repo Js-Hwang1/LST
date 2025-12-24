@@ -414,7 +414,13 @@ def normalize_answer(text: str) -> str:
 
 
 def compute_f1(prediction: str, ground_truths: list[str]) -> float:
-    """Compute token-level F1 score."""
+    """
+    Compute token-level F1 score (SQuAD/LongBench standard).
+
+    Uses Counter intersection to properly count duplicate tokens.
+    """
+    from collections import Counter
+
     pred_tokens = normalize_answer(prediction).split()
 
     if not pred_tokens:
@@ -426,12 +432,15 @@ def compute_f1(prediction: str, ground_truths: list[str]) -> float:
         if not gt_tokens:
             continue
 
-        common = set(pred_tokens) & set(gt_tokens)
-        if not common:
+        # Use Counter intersection to count duplicate tokens correctly
+        common = Counter(pred_tokens) & Counter(gt_tokens)
+        num_same = sum(common.values())
+
+        if num_same == 0:
             continue
 
-        precision = len(common) / len(pred_tokens)
-        recall = len(common) / len(gt_tokens)
+        precision = num_same / len(pred_tokens)
+        recall = num_same / len(gt_tokens)
         f1 = 2 * precision * recall / (precision + recall)
         best_f1 = max(best_f1, f1)
 
