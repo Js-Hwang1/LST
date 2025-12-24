@@ -104,6 +104,13 @@ WikiText-2 with numsamples == 100
 
 **Mistral-7B-Instruct-v0.2 with KV Cache Size = 2048:**
 
+
+
+| Method | qasper | multifieldqa_en | hotpotqa | 2wikimqa | musique | gov_report | multi_news | trec | triviaqa | samsum | lcc | repobench-p | Average |
+|--------|--------|-----------------|----------|----------|---------|------------|------------|------|----------|--------|-----|-------------|---------|
+| dense | 0.135 | 0.304 | 0.157 | 0.160 | 0.073 | 0.183 | 0.171 | 0.000 | 0.443 | 0.289 | 0.126 | 0.119 | 0.180 |
+
+
 | Method | Single-QA | Multi-QA | Summ | Few-shot | Code | Synth | Avg |
 |--------|-----------|----------|------|----------|------|-------|-----|
 | Full KV | — | — | — | — | — | — | — |
