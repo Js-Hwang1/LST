@@ -21,6 +21,7 @@ class CompressionConfig:
     num_sink: int = 4  # Number of sink tokens to keep
     num_recent: int = 8  # Number of recent tokens to keep
     budget: int | None = None  # Total token budget (if specified)
+    compression_ratio: float | None = None  # Ratio-based budget (e.g., 2.0 = 2:1 compression)
 
     # Model parameters (for reference)
     d_head: int = 64  # Dimension per attention head
@@ -30,6 +31,8 @@ class CompressionConfig:
         """Validate configuration."""
         assert self.num_sink >= 0, "num_sink must be non-negative"
         assert self.num_recent >= 0, "num_recent must be non-negative"
+        if self.compression_ratio is not None:
+            assert self.compression_ratio >= 1.0, "compression_ratio must be >= 1.0"
 
 
 class CompressionMethod(ABC):
@@ -83,14 +86,27 @@ class CompressionMethod(ABC):
         """
         Calculate the token budget for a given sequence length.
 
+        Supports two modes:
+        1. Fixed budget: config.budget = 1024 → always keep 1024 tokens
+        2. Ratio-based: config.compression_ratio = 2.0 → keep seq_len / 2 tokens
+
         Args:
             seq_len: Original sequence length
 
         Returns:
             Number of tokens to retain after compression
         """
+        # Ratio-based budget (e.g., 2:1 compression → keep half)
+        if self.config.compression_ratio is not None:
+            budget = int(seq_len / self.config.compression_ratio)
+            # Ensure minimum budget for sink + recent
+            min_budget = self.config.num_sink + self.config.num_recent
+            return max(budget, min_budget)
+
+        # Fixed budget
         if self.config.budget is not None:
             return min(self.config.budget, seq_len)
+
         return min(self.config.num_sink + self.config.num_recent, seq_len)
 
     def __repr__(self) -> str:

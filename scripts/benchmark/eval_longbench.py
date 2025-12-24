@@ -345,34 +345,40 @@ def compress_cache_mean(
 def compress_cache_with_baseline(
     cache: list[tuple[torch.Tensor, torch.Tensor]],
     method_name: str,
-    budget: int,
     num_sink: int,
     num_recent: int,
+    compression_ratio: float = 2.0,
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:
-    """Generic cache compression using baseline methods."""
+    """
+    Generic cache compression using baseline methods.
+
+    Uses compression_ratio for fair comparison with LST:
+    - compression_ratio=2.0 → keep 50% of tokens (matches LST window_size=2)
+    - compression_ratio=4.0 → keep 25% of tokens (matches LST window_size=4)
+    """
     if method_name == "h2o":
-        config = H2OConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
+        config = H2OConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
         method = H2O(config)
     elif method_name == "streaming":
-        config = StreamingLLMConfig(num_sink=num_sink, num_recent=num_recent)
+        config = StreamingLLMConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
         method = StreamingLLM(config)
     elif method_name == "tova":
-        config = TOVAConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
+        config = TOVAConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
         method = TOVA(config)
     elif method_name == "kvmerger":
-        config = KVMergerConfig(num_sink=num_sink, num_recent=num_recent)
+        config = KVMergerConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
         method = KVMerger(config)
     elif method_name == "weightedkv":
-        config = WeightedKVConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
+        config = WeightedKVConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
         method = WeightedKV(config)
     elif method_name == "cam":
-        config = CaMConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
+        config = CaMConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
         method = CaM(config)
     elif method_name == "snapkv":
-        config = SnapKVConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
+        config = SnapKVConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
         method = SnapKV(config)
     elif method_name == "pyramidkv":
-        config = PyramidKVConfig(num_sink=num_sink, num_recent=num_recent, budget=budget)
+        config = PyramidKVConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
         method = PyramidKV(config)
     else:
         raise ValueError(f"Unknown method: {method_name}")
@@ -585,10 +591,9 @@ def evaluate_sample(
         else:
             cache = list(past_kv)
 
-    # Compute budget
-    budget = num_sink + num_recent + (context_len - num_sink - num_recent) // window_size
-
     # Compress cache
+    # Note: window_size maps to compression_ratio for fair comparison
+    # window_size=2 → 2:1 compression → keep 50% of tokens
     if method == "dense":
         compressed = cache
     elif method == "lst":
@@ -596,7 +601,10 @@ def evaluate_sample(
     elif method == "mean":
         compressed = compress_cache_mean(cache, window_size, num_sink, num_recent)
     else:
-        compressed = compress_cache_with_baseline(cache, method, budget, num_sink, num_recent)
+        # Use compression_ratio = window_size for apple-to-apple comparison
+        compressed = compress_cache_with_baseline(
+            cache, method, num_sink, num_recent, compression_ratio=float(window_size)
+        )
 
     # Generate with compressed cache using manual autoregressive generation
     from transformers.cache_utils import DynamicCache
