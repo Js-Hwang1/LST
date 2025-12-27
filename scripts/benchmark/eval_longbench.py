@@ -239,6 +239,86 @@ DATASET_PROMPTS = {
 
 DEFAULT_TASKS = ["narrativeqa", "hotpotqa", "gov_report", "trec", "passage_count"]
 
+# Model-specific max context lengths (from KVCache-Factory)
+# These are critical for proper LongBench evaluation!
+MODEL_MAX_LENGTHS = {
+    "llama-2": 3950,
+    "llama-3": 7950,
+    "llama-3.1": 127500,  # 128k context
+    "mistral": 31500,  # 32k context
+    "mixtral": 31500,
+    "qwen": 31500,
+    "yi": 199500,  # 200k context
+    "phi": 127500,
+    "gemma": 7950,
+    "tinyllama": 2048,
+    # Default fallback
+    "default": 4096,
+}
+
+
+def get_model_max_length(model_name: str) -> int:
+    """
+    Get the appropriate max context length for a model.
+
+    Uses model-specific limits from KVCache-Factory for accurate benchmarking.
+    """
+    model_name_lower = model_name.lower()
+
+    # Check for specific model patterns
+    if "llama-3.1" in model_name_lower or "llama3.1" in model_name_lower:
+        return MODEL_MAX_LENGTHS["llama-3.1"]
+    elif "llama-3" in model_name_lower or "llama3" in model_name_lower:
+        return MODEL_MAX_LENGTHS["llama-3"]
+    elif "llama-2" in model_name_lower or "llama2" in model_name_lower:
+        return MODEL_MAX_LENGTHS["llama-2"]
+    elif "mistral" in model_name_lower or "mixtral" in model_name_lower:
+        return MODEL_MAX_LENGTHS["mistral"]
+    elif "qwen" in model_name_lower:
+        return MODEL_MAX_LENGTHS["qwen"]
+    elif "yi" in model_name_lower:
+        return MODEL_MAX_LENGTHS["yi"]
+    elif "phi" in model_name_lower:
+        return MODEL_MAX_LENGTHS["phi"]
+    elif "gemma" in model_name_lower:
+        return MODEL_MAX_LENGTHS["gemma"]
+    elif "tinyllama" in model_name_lower:
+        return MODEL_MAX_LENGTHS["tinyllama"]
+
+    return MODEL_MAX_LENGTHS["default"]
+
+
+def apply_chat_template(tokenizer, prompt: str, model_name: str) -> str:
+    """
+    Apply chat template for instruction-tuned models.
+
+    Instruction models like Mistral-Instruct, Llama-Instruct need proper
+    formatting to work correctly.
+    """
+    model_name_lower = model_name.lower()
+
+    # Check if model has a chat template
+    if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is not None:
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            formatted = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+            return formatted
+        except Exception as e:
+            logger.debug(f"Chat template failed: {e}, using raw prompt")
+
+    # Fallback for specific model types without chat template
+    if "instruct" in model_name_lower or "chat" in model_name_lower:
+        if "mistral" in model_name_lower or "mixtral" in model_name_lower:
+            return f"[INST] {prompt} [/INST]"
+        elif "llama" in model_name_lower:
+            return f"[INST] {prompt} [/INST]"
+
+    return prompt
+
 
 def load_model(model_name: str, device: torch.device):
     """Load model and tokenizer."""
@@ -876,6 +956,7 @@ def evaluate_sample(
     sidecar: SidecarPPL | None,
     task_config: dict,
     task_name: str,
+    model_name: str,
     window_size: int,
     num_sink: int,
     num_recent: int,
@@ -892,6 +973,7 @@ def evaluate_sample(
         sidecar: LST sidecar model (if method='lst')
         task_config: Task configuration dict
         task_name: Name of the LongBench task (for prompt selection)
+        model_name: Model name (for chat template selection)
         window_size: Compression window size
         num_sink: Number of sink tokens
         num_recent: Number of recent tokens
@@ -914,6 +996,9 @@ def evaluate_sample(
     else:
         # Fallback to simple format
         full_prompt = f"{context}\n\nQuestion: {question}\nAnswer:"
+
+    # Apply chat template for instruction-tuned models
+    full_prompt = apply_chat_template(tokenizer, full_prompt, model_name)
 
     # Tokenize the full prompt
     prompt_tokens = tokenizer(
@@ -1053,6 +1138,7 @@ def evaluate_task(
     tokenizer,
     task_name: str,
     method: str,
+    model_name: str,
     sidecar: SidecarPPL | None,
     window_size: int,
     num_sink: int,
@@ -1079,6 +1165,7 @@ def evaluate_task(
                 sidecar,
                 task_config,
                 task_name,
+                model_name,
                 window_size,
                 num_sink,
                 num_recent,
@@ -1121,7 +1208,12 @@ def main():
         help="Comma-separated list of tasks",
     )
     parser.add_argument("--num_samples", type=int, default=50, help="Samples per task")
-    parser.add_argument("--max_context_length", type=int, default=2048, help="Max context length")
+    parser.add_argument(
+        "--max_context_length",
+        type=int,
+        default=None,
+        help="Max context length (auto-detected from model if not specified)",
+    )
     parser.add_argument("--window_size", type=int, default=8, help="Compression window size")
     parser.add_argument("--num_sink", type=int, default=4, help="Number of sink tokens")
     parser.add_argument("--num_recent", type=int, default=8, help="Number of recent tokens")
@@ -1145,6 +1237,14 @@ def main():
 
     # Load model
     model, tokenizer = load_model(args.model_name, device)
+
+    # Determine max context length (auto-detect from model if not specified)
+    if args.max_context_length is None:
+        max_context_length = get_model_max_length(args.model_name)
+        logger.info(f"Auto-detected max_context_length: {max_context_length} for {args.model_name}")
+    else:
+        max_context_length = args.max_context_length
+        logger.info(f"Using specified max_context_length: {max_context_length}")
 
     # Load sidecar if needed
     sidecar = None
@@ -1170,12 +1270,13 @@ def main():
                     tokenizer,
                     task,
                     method,
+                    args.model_name,
                     sidecar,
                     args.window_size,
                     args.num_sink,
                     args.num_recent,
                     args.num_samples,
-                    args.max_context_length,
+                    max_context_length,
                 )
                 method_results[task] = result
                 logger.info(f"    Score: {result['score']*100:.2f}% ({result['metric']})")
@@ -1194,6 +1295,7 @@ def main():
     print("LONGBENCH EVALUATION RESULTS (scores in %)")
     print("=" * 80)
     print(f"Model: {args.model_name}")
+    print(f"Max context length: {max_context_length}")
     print(f"Tasks: {tasks}")
     print(f"Samples per task: {args.num_samples}")
     print(f"Window size: {args.window_size} ({args.window_size}:1 compression)")
