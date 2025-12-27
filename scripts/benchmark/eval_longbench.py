@@ -961,6 +961,7 @@ def evaluate_sample(
     num_sink: int,
     num_recent: int,
     max_context_length: int,
+    debug: bool = False,
 ) -> tuple[float, str]:
     """
     Evaluate a single sample.
@@ -978,11 +979,13 @@ def evaluate_sample(
         num_sink: Number of sink tokens
         num_recent: Number of recent tokens
         max_context_length: Maximum context length
+        debug: If True, print debug information
 
     Returns:
         Tuple of (score, generated_text)
     """
     device = next(model.parameters()).device
+    max_new_tokens = task_config.get("max_gen", 64)
 
     # Build prompt using official LongBench template
     context = sample["context"]
@@ -1001,108 +1004,118 @@ def evaluate_sample(
     full_prompt = apply_chat_template(tokenizer, full_prompt, model_name)
 
     # Tokenize the full prompt
-    prompt_tokens = tokenizer(
+    input_ids = tokenizer(
         full_prompt,
         return_tensors="pt",
         truncation=True,
         max_length=max_context_length,
         add_special_tokens=True,
-    )
-    input_ids = prompt_tokens.input_ids.to(device)
+    ).input_ids.to(device)
 
-    # Get cache from context (all but last few tokens)
-    context_len = max(1, input_ids.shape[1] - 20)
-    context_ids = input_ids[:, :context_len]
-    question_ids = input_ids[:, context_len:]
+    prompt_len = input_ids.shape[1]
 
-    with torch.no_grad():
-        outputs = model(context_ids, use_cache=True)
-        past_kv = outputs.past_key_values
+    if debug:
+        logger.info(f"Prompt length: {prompt_len} tokens")
+        logger.info(f"Prompt (last 200 chars): ...{full_prompt[-200:]}")
 
-        # Convert DynamicCache to list of tuples if needed
-        if hasattr(past_kv, "key_cache"):
-            cache = [
-                (past_kv.key_cache[i], past_kv.value_cache[i])
-                for i in range(len(past_kv.key_cache))
-            ]
-        else:
-            cache = list(past_kv)
-
-    # Compress cache
-    # Note: window_size maps to compression_ratio for fair comparison
-    # window_size=2 → 2:1 compression → keep 50% of tokens
+    # For dense (no compression), use model.generate() directly
+    # This matches KVCache-Factory's approach and is more reliable
     if method == "dense":
-        compressed = cache
-    elif method == "lst":
-        compressed = compress_cache_lst(cache, sidecar, window_size, num_sink, num_recent)
-    elif method == "mean":
-        compressed = compress_cache_mean(cache, window_size, num_sink, num_recent)
+        with torch.no_grad():
+            output_ids = model.generate(
+                input_ids,
+                max_new_tokens=max_new_tokens,
+                num_beams=1,
+                do_sample=False,
+                temperature=1.0,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+        # Decode only the generated part
+        response = tokenizer.decode(
+            output_ids[0, prompt_len:],
+            skip_special_tokens=True,
+        ).strip()
     else:
-        # Use compression_ratio = window_size for apple-to-apple comparison
-        compressed = compress_cache_with_baseline(
-            cache, method, num_sink, num_recent, compression_ratio=float(window_size)
-        )
+        # For compression methods, use cache-based generation
+        # Split: process most tokens to build cache, keep last few for generation
+        split_point = max(1, prompt_len - 20)
+        context_ids = input_ids[:, :split_point]
+        question_ids = input_ids[:, split_point:]
 
-    # Generate with compressed cache using manual autoregressive generation
-    from transformers.cache_utils import DynamicCache
+        with torch.no_grad():
+            outputs = model(context_ids, use_cache=True)
+            past_kv = outputs.past_key_values
 
-    max_new_tokens = task_config.get("max_gen", 64)
+            # Convert DynamicCache to list of tuples if needed
+            if hasattr(past_kv, "key_cache"):
+                cache = [
+                    (past_kv.key_cache[i], past_kv.value_cache[i])
+                    for i in range(len(past_kv.key_cache))
+                ]
+            else:
+                cache = list(past_kv)
 
-    # Convert cache list to DynamicCache for newer transformers
-    past_kv = DynamicCache()
-    for k, v in compressed:
-        past_kv.update(k, v, layer_idx=len(past_kv))
+        # Compress cache based on method
+        if method == "lst":
+            compressed = compress_cache_lst(cache, sidecar, window_size, num_sink, num_recent)
+        elif method == "mean":
+            compressed = compress_cache_mean(cache, window_size, num_sink, num_recent)
+        else:
+            compressed = compress_cache_with_baseline(
+                cache, method, num_sink, num_recent, compression_ratio=float(window_size)
+            )
 
-    # Get cache length from the actual compressed cache
-    cache_len = compressed[0][0].shape[2] if compressed else 0
+        # Generate with compressed cache
+        from transformers.cache_utils import DynamicCache
 
-    # Ensure cache_len is valid (must be non-negative)
-    if cache_len < 0:
-        raise ValueError(f"Invalid cache_len: {cache_len}")
+        past_kv = DynamicCache()
+        for k, v in compressed:
+            past_kv.update(k, v, layer_idx=len(past_kv))
 
-    # Manual autoregressive generation (works better with external cache)
-    all_tokens = question_ids.clone()
+        cache_len = compressed[0][0].shape[2] if compressed else 0
+        all_tokens = question_ids.clone()
 
-    with torch.no_grad():
-        # Process all question tokens in ONE forward pass (not token-by-token)
-        q_len = question_ids.shape[1]
+        with torch.no_grad():
+            # Process remaining question tokens
+            q_len = question_ids.shape[1]
+            position_ids = torch.arange(
+                cache_len, cache_len + q_len, device=device, dtype=torch.long
+            ).unsqueeze(0)
 
-        # Ensure position_ids are non-negative (use long dtype for large positions)
-        position_ids = torch.arange(
-            cache_len, cache_len + q_len, device=device, dtype=torch.long
-        ).unsqueeze(0)
-
-        out = model(
-            question_ids,
-            past_key_values=past_kv,
-            position_ids=position_ids,
-            use_cache=True,
-        )
-        past_kv = out.past_key_values
-
-        # Then generate new tokens
-        for _ in range(max_new_tokens):
-            pos = cache_len + all_tokens.shape[1]
-            # Use long dtype to avoid overflow issues with large position values
-            position_ids = torch.tensor([[pos]], device=device, dtype=torch.long)
             out = model(
-                all_tokens[:, -1:],
+                question_ids,
                 past_key_values=past_kv,
                 position_ids=position_ids,
                 use_cache=True,
             )
             past_kv = out.past_key_values
-            next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-            all_tokens = torch.cat([all_tokens, next_token], dim=1)
 
-            if next_token.item() == tokenizer.eos_token_id:
-                break
+            # Generate new tokens
+            for _ in range(max_new_tokens):
+                pos = cache_len + all_tokens.shape[1]
+                position_ids = torch.tensor([[pos]], device=device, dtype=torch.long)
+                out = model(
+                    all_tokens[:, -1:],
+                    past_key_values=past_kv,
+                    position_ids=position_ids,
+                    use_cache=True,
+                )
+                past_kv = out.past_key_values
+                next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                all_tokens = torch.cat([all_tokens, next_token], dim=1)
 
-    # Decode response
-    response = tokenizer.decode(
-        all_tokens[0, question_ids.shape[1] :],
-        skip_special_tokens=True,
-    ).strip()
+                if next_token.item() == tokenizer.eos_token_id:
+                    break
+
+        response = tokenizer.decode(
+            all_tokens[0, question_ids.shape[1]:],
+            skip_special_tokens=True,
+        ).strip()
+
+    if debug:
+        logger.info(f"Generated response: {response[:200]}...")
+        logger.info(f"Expected answers: {sample.get('answers', [])[:3]}")
 
     # Apply task-specific preprocessing (official LongBench standard)
     processed_response = preprocess_prediction(response, task_name)
@@ -1145,6 +1158,7 @@ def evaluate_task(
     num_recent: int,
     num_samples: int,
     max_context_length: int,
+    debug: bool = False,
 ) -> dict:
     """Evaluate a single LongBench task."""
     task_config = TASK_CONFIGS.get(task_name, {"type": "qa", "metric": "f1", "max_gen": 64})
@@ -1155,7 +1169,9 @@ def evaluate_task(
         return {"score": 0.0, "n_samples": 0, "error": "Failed to load data"}
 
     scores = []
-    for sample in tqdm(samples, desc=f"{task_name}", leave=False):
+    for idx, sample in enumerate(tqdm(samples, desc=f"{task_name}", leave=False)):
+        # Enable debug only for first 3 samples when debug flag is set
+        sample_debug = debug and idx < 3
         try:
             score, _ = evaluate_sample(
                 model,
@@ -1170,6 +1186,7 @@ def evaluate_task(
                 num_sink,
                 num_recent,
                 max_context_length,
+                debug=sample_debug,
             )
             scores.append(score)
         except Exception as e:
@@ -1218,6 +1235,7 @@ def main():
     parser.add_argument("--num_sink", type=int, default=4, help="Number of sink tokens")
     parser.add_argument("--num_recent", type=int, default=8, help="Number of recent tokens")
     parser.add_argument("--output_file", type=str, default=None, help="Save results to JSON")
+    parser.add_argument("--debug", action="store_true", help="Enable debug output for first few samples")
 
     args = parser.parse_args()
 
@@ -1277,6 +1295,7 @@ def main():
                     args.num_recent,
                     args.num_samples,
                     max_context_length,
+                    debug=args.debug,
                 )
                 method_results[task] = result
                 logger.info(f"    Score: {result['score']*100:.2f}% ({result['metric']})")
