@@ -105,32 +105,84 @@ WikiText-2 with numsamples == 100
 **Mistral-7B-Instruct-v0.2 with KV Cache Size = 2048:**
 
 
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2" style="text-align: center;">Method</th>
+      <th colspan="2" style="text-align: center;">Single-Doc QA</th>
+      <th colspan="3" style="text-align: center;">Multi-Doc QA</th>
+      <th colspan="2" style="text-align: center;">Summarization</th>
+      <th colspan="3" style="text-align: center;">Few-shot</th>
+      <th colspan="2" style="text-align: center;">Code</th>
+      <th rowspan="2" style="text-align: center;">Avg</th>
+    </tr>
+    <tr>
+      <th>Qasper</th>
+      <th>Multifield</th>
+      <th>HotpotQA</th>
+      <th>2WikiMQA</th>
+      <th>MuSiQue</th>
+      <th>GovReport</th>
+      <th>MultiNews</th>
+      <th>SAMSum</th>
+      <th>TREC</th>
+      <th>TriviaQA</th>
+      <th>LCC</th>
+      <th>Repobench</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>dense</td>
+      <td>0.135</td>
+      <td>0.304</td>
+      <td>0.157</td>
+      <td>0.160</td>
+      <td>0.073</td>
+      <td>0.183</td>
+      <td>0.171</td>
+      <td>0.289</td>
+      <td>0.000</td>
+      <td>0.443</td>
+      <td>0.126</td>
+      <td>0.119</td>
+      <td>0.180</td>
+    </tr>
+    <tr>
+      <td>LST</td>
+      <td>0.083</td>
+      <td>0.240</td>
+      <td>0.112</td>
+      <td>0.137</td>
+      <td>0.055</td>
+      <td>0.153</td>
+      <td>0.156</td>
+      <td>0.085</td>
+      <td>0.000</td>
+      <td>0.214</td>
+      <td>0.108</td>
+      <td>0.127</td>
+      <td>0.122</td>
+    </tr>
+    <tr>
+      <td>H2O</td>
+      <td>0.069</td>
+      <td>0.181</td>
+      <td>0.103</td>
+      <td>0.119</td>
+      <td>0.036</td>
+      <td>0.121</td>
+      <td>0.078</td>
+      <td>0.107</td>
+      <td>0.000</td>
+      <td>0.201</td>
+      <td>0.113</td>
+      <td>0.120</td>
+      <td>0.104</td>
+    </tr>
+  </tbody>
+</table>
 
-| Method | qasper | multifieldqa_en | hotpotqa | 2wikimqa | musique | gov_report | multi_news | trec | triviaqa | samsum | lcc | repobench-p | Average |
-|--------|--------|-----------------|----------|----------|---------|------------|------------|------|----------|--------|-----|-------------|---------|
-| dense | 0.135 | 0.304 | 0.157 | 0.160 | 0.073 | 0.183 | 0.171 | 0.000 | 0.443 | 0.289 | 0.126 | 0.119 | 0.180 |
-| LST | 0.083 | 0.240 | 0.112 | 0.137 | 0.055 | 0.153 | 0.156 | 0.000 | 0.214 | 0.085 | 0.108 | 0.127 | 0.122
-| H2O | 0.069 | 0.181 | 0.103 | 0.119 | 0.036 | 0.121 | 0.078 | 0.000 | 0.201 | 0.107 | 0.113 | 0.120 | 0.104 |
-
-
-| Method | Single-QA | Multi-QA | Summ | Few-shot | Code | Synth | Avg |
-|--------|-----------|----------|------|----------|------|-------|-----|
-| Full KV | — | — | — | — | — | — | — |
-| **LST (Ours)** | — | — | — | — | — | — | — |
-| H2O | — | — | — | — | — | — | — |
-| SnapKV | — | — | — | — | — | — | — |
-| PyramidKV | — | — | — | — | — | — | — |
-| StreamingLLM | — | — | — | — | — | — | — |
-
-**Task Categories (17 total):**
-| Category | Tasks |
-|----------|-------|
-| Single-Doc QA | NarrativeQA, Qasper, MultiFieldQA-en |
-| Multi-Doc QA | HotpotQA, 2WikiMQA, MuSiQue |
-| Summarization | GovReport, QMSum, MultiNews |
-| Few-shot | TREC, TriviaQA, SAMSum |
-| Code | LCC, RepoBench-P |
-| Synthetic | PassageCount, PassageRetrieval-en |
 
 **Evaluation Settings:**
 - Models: Mistral-7B-Instruct-v0.2 (32K context), Llama-3-8B-Instruct (8K context)

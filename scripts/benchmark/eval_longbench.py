@@ -6,6 +6,15 @@ LongBench Evaluation Script
 Evaluate LST and baselines on LongBench, a comprehensive benchmark
 for long-context language understanding.
 
+This implementation follows the official LongBench evaluation protocol:
+- Uses official prompt templates from THUDM/LongBench
+- Applies task-specific prediction preprocessing
+- Uses standard metrics (F1, ROUGE-L, classification score, etc.)
+- Reports scores as percentages (0-100) matching published results
+
+Dependencies:
+    pip install rouge fuzzywuzzy python-Levenshtein
+
 Usage:
     python scripts/benchmark/eval_longbench.py \\
         --model_name TinyLlama/TinyLlama-1.1B-Chat-v1.0 \\
@@ -30,19 +39,22 @@ LongBench Tasks (grouped by category):
         - multi_news: Multi-document news summarization
 
     Few-shot Learning:
-        - trec: Question classification
+        - trec: Question classification (uses classification metric)
         - triviaqa: Trivia questions
         - samsum: Dialogue summarization
 
     Synthetic:
-        - passage_count: Count passages containing keyword
-        - passage_retrieval_en: Retrieve relevant passage
+        - passage_count: Count unique paragraphs (uses count metric)
+        - passage_retrieval_en: Retrieve relevant passage (uses retrieval metric)
 
     Code:
-        - lcc: Long code completion
-        - repobench-p: Repository-level code completion
+        - lcc: Long code completion (uses code_sim metric)
+        - repobench-p: Repository-level code completion (uses code_sim metric)
 
-Reference: Bai et al. "LongBench: A Bilingual, Multitask Benchmark for Long Context Understanding"
+Reference:
+    - Bai et al. "LongBench: A Bilingual, Multitask Benchmark for Long Context Understanding"
+    - https://github.com/THUDM/LongBench
+    - https://github.com/Zefan-Cai/KVCache-Factory
 """
 
 import argparse
@@ -81,7 +93,7 @@ from src.LST.sidecar import SidecarPPL
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Task configurations
+# Task configurations with updated metrics to match official LongBench
 TASK_CONFIGS = {
     # Single-doc QA
     "narrativeqa": {"type": "qa", "metric": "f1", "max_gen": 128},
@@ -96,15 +108,133 @@ TASK_CONFIGS = {
     "qmsum": {"type": "summarization", "metric": "rouge", "max_gen": 256},
     "multi_news": {"type": "summarization", "metric": "rouge", "max_gen": 256},
     # Few-shot
-    "trec": {"type": "classification", "metric": "accuracy", "max_gen": 16},
+    "trec": {"type": "classification", "metric": "classification", "max_gen": 16},
     "triviaqa": {"type": "qa", "metric": "f1", "max_gen": 32},
     "samsum": {"type": "summarization", "metric": "rouge", "max_gen": 128},
-    # Synthetic
-    "passage_count": {"type": "counting", "metric": "accuracy", "max_gen": 8},
-    "passage_retrieval_en": {"type": "retrieval", "metric": "accuracy", "max_gen": 32},
+    # Synthetic - use official count/retrieval metrics
+    "passage_count": {"type": "counting", "metric": "count", "max_gen": 32},
+    "passage_retrieval_en": {"type": "retrieval", "metric": "retrieval", "max_gen": 32},
     # Code
-    "lcc": {"type": "code", "metric": "edit_sim", "max_gen": 64},
-    "repobench-p": {"type": "code", "metric": "edit_sim", "max_gen": 64},
+    "lcc": {"type": "code", "metric": "code_sim", "max_gen": 64},
+    "repobench-p": {"type": "code", "metric": "code_sim", "max_gen": 64},
+}
+
+# TREC classification labels (official LongBench)
+TREC_CLASSES = [
+    "ABBR", "ENTY", "DESC", "HUM", "LOC", "NUM",
+    "ABBREVIATION", "ENTITY", "DESCRIPTION", "HUMAN", "LOCATION", "NUMERIC",
+]
+
+# Official LongBench prompt templates (from THUDM/LongBench)
+DATASET_PROMPTS = {
+    "narrativeqa": (
+        "You are given a story, which can be either a novel or a movie script, "
+        "and a question. Answer the question as concisely as you can, using a "
+        "single phrase if possible. Do not provide any explanation.\n\n"
+        "Story: {context}\n\nNow, answer the question based on the story as "
+        "concisely as you can, using a single phrase if possible. Do not provide "
+        "any explanation.\n\nQuestion: {input}\n\nAnswer:"
+    ),
+    "qasper": (
+        "You are given a scientific article and a question. Answer the question "
+        "as concisely as you can, using a single phrase or sentence if possible. "
+        "If the question cannot be answered based on the information in the article, "
+        "write \"unanswerable\". If the question is a yes/no question, answer "
+        "\"yes\", \"no\", or \"unanswerable\". Do not provide any explanation.\n\n"
+        "Article: {context}\n\nAnswer the question based on the above article as "
+        "concisely as you can, using a single phrase or sentence if possible. "
+        "If the question cannot be answered based on the information in the article, "
+        "write \"unanswerable\". If the question is a yes/no question, answer "
+        "\"yes\", \"no\", or \"unanswerable\". Do not provide any explanation.\n\n"
+        "Question: {input}\n\nAnswer:"
+    ),
+    "multifieldqa_en": (
+        "Read the following text and answer briefly.\n\n"
+        "{context}\n\nNow, answer the following question based on the above text, "
+        "only give me the answer and do not output any other words.\n\n"
+        "Question: {input}\nAnswer:"
+    ),
+    "hotpotqa": (
+        "Answer the question based on the given passages. Only give me the answer "
+        "and do not output any other words.\n\n"
+        "The following are given passages.\n{context}\n\n"
+        "Answer the question based on the given passages. Only give me the answer "
+        "and do not output any other words.\n\n"
+        "Question: {input}\nAnswer:"
+    ),
+    "2wikimqa": (
+        "Answer the question based on the given passages. Only give me the answer "
+        "and do not output any other words.\n\n"
+        "The following are given passages.\n{context}\n\n"
+        "Answer the question based on the given passages. Only give me the answer "
+        "and do not output any other words.\n\n"
+        "Question: {input}\nAnswer:"
+    ),
+    "musique": (
+        "Answer the question based on the given passages. Only give me the answer "
+        "and do not output any other words.\n\n"
+        "The following are given passages.\n{context}\n\n"
+        "Answer the question based on the given passages. Only give me the answer "
+        "and do not output any other words.\n\n"
+        "Question: {input}\nAnswer:"
+    ),
+    "gov_report": (
+        "You are given a report by a government agency. Write a one-page summary "
+        "of the report.\n\n"
+        "Report:\n{context}\n\n"
+        "Now, write a one-page summary of the report.\n\nSummary:"
+    ),
+    "qmsum": (
+        "You are given a meeting transcript and a query containing a question or "
+        "instruction. Answer the query in one or more sentences.\n\n"
+        "Transcript:\n{context}\n\n"
+        "Now, answer the query based on the above meeting transcript in one or "
+        "more sentences.\n\n"
+        "Query: {input}\nAnswer:"
+    ),
+    "multi_news": (
+        "You are given several news passages. Write a one-page summary of all "
+        "news.\n\n"
+        "{context}\n\n"
+        "Now, write a one-page summary of all the news.\n\nSummary:"
+    ),
+    "trec": (
+        "Please determine the type of the question below. Here are some examples "
+        "of questions.\n\n{context}\n\n"
+        "{input}"
+    ),
+    "triviaqa": (
+        "Answer the question based on the given passage. Only give me the answer "
+        "and do not output any other words. The following are some examples.\n\n"
+        "{context}\n\n{input}"
+    ),
+    "samsum": (
+        "Summarize the dialogue into a few short sentences. The following are "
+        "some examples.\n\n{context}\n\n{input}"
+    ),
+    "passage_count": (
+        "There are some paragraphs below sourced from Wikipedia. Some of them may "
+        "be duplicates. Please carefully read these paragraphs and determine how "
+        "many unique paragraphs there are after removing duplicates. In other words, "
+        "how many non-repeating paragraphs are there in total?\n\n"
+        "{context}\n\n"
+        "Please enter the final count of unique paragraphs after removing duplicates. "
+        "The answer is a positive integer.\n\nAnswer:"
+    ),
+    "passage_retrieval_en": (
+        "Here are 30 paragraphs from Wikipedia, along with an abstract. Please "
+        "determine which paragraph the abstract is from.\n\n"
+        "{context}\n\n"
+        "The following is an abstract.\n\n{input}\n\n"
+        "Please enter the number of the paragraph that the abstract is from. "
+        "The answer format must be like \"Paragraph 1\", \"Paragraph 2\", etc.\n\nAnswer:"
+    ),
+    "lcc": (
+        "Please complete the code given below.\n\n{context}{input}"
+    ),
+    "repobench-p": (
+        "Please complete the code given below.\n\n{context}{input}"
+    ),
 }
 
 DEFAULT_TASKS = ["narrativeqa", "hotpotqa", "gov_report", "trec", "passage_count"]
@@ -402,21 +532,45 @@ def compress_cache_with_baseline(
     return compressed
 
 
+def preprocess_prediction(prediction: str, task_name: str) -> str:
+    """
+    Preprocess prediction based on task type (official LongBench standard).
+
+    For classification/short-answer tasks, take only the first line
+    to avoid penalizing models that provide explanations.
+    """
+    # Tasks that require first-line extraction (per official LongBench eval.py)
+    first_line_tasks = {"trec", "triviaqa", "samsum", "lsht"}
+
+    if task_name in first_line_tasks:
+        prediction = prediction.lstrip('\n').split('\n')[0]
+
+    return prediction
+
+
 def normalize_answer(text: str) -> str:
-    """Normalize answer for comparison."""
+    """
+    Normalize answer for comparison (official LongBench standard).
+
+    Order: lowercase -> remove punctuation -> remove articles -> fix whitespace
+    """
     import re
     import string
 
-    # Lowercase
-    text = text.lower()
-    # Remove punctuation
-    text = text.translate(str.maketrans("", "", string.punctuation))
-    # Remove articles
-    text = re.sub(r"\b(a|an|the)\b", " ", text)
-    # Remove extra whitespace
-    text = " ".join(text.split())
+    def remove_articles(text: str) -> str:
+        return re.sub(r"\b(a|an|the)\b", " ", text)
 
-    return text
+    def white_space_fix(text: str) -> str:
+        return " ".join(text.split())
+
+    def remove_punc(text: str) -> str:
+        exclude = set(string.punctuation)
+        return "".join(ch for ch in text if ch not in exclude)
+
+    def lower(text: str) -> str:
+        return text.lower()
+
+    return white_space_fix(remove_articles(remove_punc(lower(text))))
 
 
 def compute_f1(prediction: str, ground_truths: list[str]) -> float:
@@ -454,7 +608,38 @@ def compute_f1(prediction: str, ground_truths: list[str]) -> float:
 
 
 def compute_rouge_l(prediction: str, ground_truths: list[str]) -> float:
-    """Compute ROUGE-L score."""
+    """
+    Compute ROUGE-L score using the rouge library (official LongBench standard).
+
+    Falls back to custom implementation if rouge library fails.
+    """
+    try:
+        from rouge import Rouge
+        rouge = Rouge()
+    except ImportError:
+        logger.warning("rouge library not installed, using fallback implementation")
+        return _compute_rouge_l_fallback(prediction, ground_truths)
+
+    if not prediction.strip():
+        return 0.0
+
+    best_score = 0.0
+    for gt in ground_truths:
+        if not gt.strip():
+            continue
+        try:
+            scores = rouge.get_scores([prediction], [gt], avg=True)
+            score = scores["rouge-l"]["f"]
+            best_score = max(best_score, score)
+        except Exception:
+            # Fallback for edge cases (empty strings, etc.)
+            continue
+
+    return best_score
+
+
+def _compute_rouge_l_fallback(prediction: str, ground_truths: list[str]) -> float:
+    """Fallback ROUGE-L implementation if rouge library unavailable."""
 
     def lcs_length(x: list[str], y: list[str]) -> int:
         m, n = len(x), len(y)
@@ -488,14 +673,47 @@ def compute_rouge_l(prediction: str, ground_truths: list[str]) -> float:
     return best_score
 
 
-def compute_accuracy(prediction: str, ground_truths: list[str]) -> float:
+def compute_classification_score(
+    prediction: str, ground_truths: list[str], all_classes: list[str] | None = None
+) -> float:
     """
-    Compute accuracy for classification tasks.
+    Compute classification score (official LongBench standard).
 
-    For classification (e.g., TREC), checks if the ground truth label
-    appears in the model's response, since models often output
-    "The answer is DESCRIPTION" rather than just "DESCRIPTION".
+    Uses precision-penalized matching: if multiple class labels appear in
+    the prediction, the score is reduced proportionally.
+
+    Args:
+        prediction: Model's output
+        ground_truths: List of correct answers
+        all_classes: List of all possible class labels for this task
     """
+    if all_classes is None:
+        # Fallback to simple accuracy if no class list provided
+        return _compute_accuracy_fallback(prediction, ground_truths)
+
+    # Find all class labels mentioned in prediction
+    em_match_list = []
+    for class_name in all_classes:
+        if class_name in prediction:
+            em_match_list.append(class_name)
+
+    # Remove partial matches (e.g., if "ENTITY" matches but ground truth is "ENTITY:PERSON")
+    for match_term in em_match_list.copy():
+        for gt in ground_truths:
+            if match_term in gt and match_term != gt:
+                if match_term in em_match_list:
+                    em_match_list.remove(match_term)
+
+    # Check if ground truth is among matches, penalize for multiple matches
+    for gt in ground_truths:
+        if gt in em_match_list:
+            return 1.0 / len(em_match_list)
+
+    return 0.0
+
+
+def _compute_accuracy_fallback(prediction: str, ground_truths: list[str]) -> float:
+    """Fallback simple accuracy when all_classes not available."""
     pred_norm = normalize_answer(prediction)
 
     for gt in ground_truths:
@@ -506,20 +724,111 @@ def compute_accuracy(prediction: str, ground_truths: list[str]) -> float:
             return 1.0
 
         # Check if ground truth label is contained in prediction
-        # (handles "The type is DESCRIPTION" matching "DESCRIPTION")
         if gt_norm in pred_norm:
-            return 1.0
-
-        # Check if prediction is contained in ground truth
-        # (handles abbreviated responses)
-        if pred_norm and pred_norm in gt_norm:
             return 1.0
 
     return 0.0
 
 
-def compute_edit_similarity(prediction: str, ground_truths: list[str]) -> float:
-    """Compute edit similarity for code completion."""
+def compute_count_score(prediction: str, ground_truths: list[str]) -> float:
+    """
+    Compute count score for passage_count task (official LongBench standard).
+
+    Extracts all numbers from prediction and computes precision:
+    how many of the extracted numbers match the ground truth.
+    """
+    import re
+
+    # Extract all numbers from prediction
+    numbers = re.findall(r"\d+", prediction)
+
+    if not numbers:
+        return 0.0
+
+    # Count how many match the ground truth
+    right_num = 0
+    for gt in ground_truths:
+        gt_str = str(gt).strip()
+        for number in numbers:
+            if str(number) == gt_str:
+                right_num += 1
+
+    # Precision: correct / total extracted
+    return right_num / len(numbers)
+
+
+def compute_retrieval_score(prediction: str, ground_truths: list[str]) -> float:
+    """
+    Compute retrieval score for passage_retrieval task (official LongBench standard).
+
+    Extracts paragraph ID from ground truth and checks if prediction contains it.
+    Uses precision scoring if multiple numbers are predicted.
+    """
+    import re
+
+    # Extract paragraph ID from ground truth (format: "Paragraph X")
+    ground_truth_id = None
+    for gt in ground_truths:
+        pattern = r'Paragraph (\d+)'
+        matches = re.findall(pattern, gt)
+        if matches:
+            ground_truth_id = matches[0]
+            break
+
+    if ground_truth_id is None:
+        # Fallback: use first ground truth as-is
+        ground_truth_id = str(ground_truths[0]).strip() if ground_truths else ""
+
+    # Extract all numbers from prediction
+    numbers = re.findall(r"\d+", prediction)
+
+    if not numbers:
+        return 0.0
+
+    # Count how many match the ground truth ID
+    right_num = sum(1 for n in numbers if str(n) == ground_truth_id)
+
+    # Precision: correct / total extracted
+    return right_num / len(numbers)
+
+
+def compute_code_similarity(prediction: str, ground_truths: list[str]) -> float:
+    """
+    Compute code similarity using fuzzywuzzy (official LongBench standard).
+
+    Preprocessing: Extract first non-comment, non-markdown line from prediction.
+    """
+    try:
+        from fuzzywuzzy import fuzz
+    except ImportError:
+        logger.warning("fuzzywuzzy not installed, using fallback edit similarity")
+        return _compute_edit_similarity_fallback(prediction, ground_truths)
+
+    # Official preprocessing: extract first meaningful code line
+    all_lines = prediction.lstrip('\n').split('\n')
+    processed_prediction = ""
+    for line in all_lines:
+        # Skip markdown code blocks, comments
+        if ('`' not in line) and ('#' not in line) and ('//' not in line):
+            processed_prediction = line
+            break
+
+    if not processed_prediction:
+        processed_prediction = prediction.lstrip('\n').split('\n')[0] if prediction.strip() else ""
+
+    best_sim = 0.0
+    for gt in ground_truths:
+        if not gt:
+            continue
+        # fuzz.ratio returns 0-100, normalize to 0-1
+        sim = fuzz.ratio(processed_prediction, gt) / 100.0
+        best_sim = max(best_sim, sim)
+
+    return best_sim
+
+
+def _compute_edit_similarity_fallback(prediction: str, ground_truths: list[str]) -> float:
+    """Fallback edit similarity if fuzzywuzzy unavailable."""
 
     def edit_distance(s1: str, s2: str) -> int:
         m, n = len(s1), len(s2)
@@ -536,12 +845,23 @@ def compute_edit_similarity(prediction: str, ground_truths: list[str]) -> float:
                     dp[i][j] = 1 + min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1])
         return dp[m][n]
 
+    # Apply same preprocessing as official
+    all_lines = prediction.lstrip('\n').split('\n')
+    processed_prediction = ""
+    for line in all_lines:
+        if ('`' not in line) and ('#' not in line) and ('//' not in line):
+            processed_prediction = line
+            break
+
+    if not processed_prediction:
+        processed_prediction = prediction.lstrip('\n').split('\n')[0] if prediction.strip() else ""
+
     best_sim = 0.0
     for gt in ground_truths:
-        max_len = max(len(prediction), len(gt))
+        max_len = max(len(processed_prediction), len(gt))
         if max_len == 0:
             continue
-        dist = edit_distance(prediction, gt)
+        dist = edit_distance(processed_prediction, gt)
         sim = 1 - dist / max_len
         best_sim = max(best_sim, sim)
 
@@ -555,6 +875,7 @@ def evaluate_sample(
     method: str,
     sidecar: SidecarPPL | None,
     task_config: dict,
+    task_name: str,
     window_size: int,
     num_sink: int,
     num_recent: int,
@@ -563,36 +884,46 @@ def evaluate_sample(
     """
     Evaluate a single sample.
 
+    Args:
+        model: The language model
+        tokenizer: The tokenizer
+        sample: Sample dict with 'input', 'context', 'answers'
+        method: Compression method name
+        sidecar: LST sidecar model (if method='lst')
+        task_config: Task configuration dict
+        task_name: Name of the LongBench task (for prompt selection)
+        window_size: Compression window size
+        num_sink: Number of sink tokens
+        num_recent: Number of recent tokens
+        max_context_length: Maximum context length
+
     Returns:
         Tuple of (score, generated_text)
     """
     device = next(model.parameters()).device
 
-    # Build prompt with proper truncation that preserves the question
+    # Build prompt using official LongBench template
     context = sample["context"]
     question = sample["input"]
 
-    # Tokenize question suffix first to reserve space for it
-    question_suffix = f"\n\nQuestion: {question}\nAnswer:"
-    question_tokens = tokenizer(question_suffix, add_special_tokens=False, return_tensors="pt")
-    question_len = question_tokens.input_ids.shape[1]
+    # Get official prompt template for this task
+    prompt_template = DATASET_PROMPTS.get(task_name)
+    if prompt_template:
+        # Use official prompt format
+        full_prompt = prompt_template.format(context=context, input=question)
+    else:
+        # Fallback to simple format
+        full_prompt = f"{context}\n\nQuestion: {question}\nAnswer:"
 
-    # Reserve tokens for question (with some buffer for generation)
-    context_budget = max_context_length - question_len - 10
-
-    # Tokenize and truncate context only
-    context_tokens = tokenizer(
-        context,
+    # Tokenize the full prompt
+    prompt_tokens = tokenizer(
+        full_prompt,
         return_tensors="pt",
         truncation=True,
-        max_length=context_budget,
-        add_special_tokens=True,  # Include BOS token
+        max_length=max_context_length,
+        add_special_tokens=True,
     )
-
-    # Concatenate: [context_tokens] + [question_tokens]
-    input_ids = torch.cat(
-        [context_tokens.input_ids, question_tokens.input_ids], dim=1
-    ).to(device)
+    input_ids = prompt_tokens.input_ids.to(device)
 
     # Get cache from context (all but last few tokens)
     context_len = max(1, input_ids.shape[1] - 20)
@@ -688,6 +1019,9 @@ def evaluate_sample(
         skip_special_tokens=True,
     ).strip()
 
+    # Apply task-specific preprocessing (official LongBench standard)
+    processed_response = preprocess_prediction(response, task_name)
+
     # Compute score based on metric
     answers = sample.get("answers", [])
     if isinstance(answers, str):
@@ -695,13 +1029,19 @@ def evaluate_sample(
 
     metric = task_config.get("metric", "f1")
     if metric == "f1":
-        score = compute_f1(response, answers)
+        score = compute_f1(processed_response, answers)
     elif metric == "rouge":
-        score = compute_rouge_l(response, answers)
-    elif metric == "accuracy":
-        score = compute_accuracy(response, answers)
-    elif metric == "edit_sim":
-        score = compute_edit_similarity(response, answers)
+        score = compute_rouge_l(processed_response, answers)
+    elif metric == "classification":
+        # Use TREC classes for trec task, otherwise fall back
+        all_classes = TREC_CLASSES if task_name == "trec" else None
+        score = compute_classification_score(processed_response, answers, all_classes)
+    elif metric == "count":
+        score = compute_count_score(processed_response, answers)
+    elif metric == "retrieval":
+        score = compute_retrieval_score(processed_response, answers)
+    elif metric == "code_sim":
+        score = compute_code_similarity(processed_response, answers)
     else:
         score = 0.0
 
@@ -738,6 +1078,7 @@ def evaluate_task(
                 method,
                 sidecar,
                 task_config,
+                task_name,
                 window_size,
                 num_sink,
                 num_recent,
@@ -837,7 +1178,7 @@ def main():
                     args.max_context_length,
                 )
                 method_results[task] = result
-                logger.info(f"    Score: {result['score']:.3f} ({result['metric']})")
+                logger.info(f"    Score: {result['score']*100:.2f}% ({result['metric']})")
             except Exception as e:
                 logger.error(f"    FAILED: {e}")
                 method_results[task] = {"score": 0.0, "error": str(e)}
@@ -848,14 +1189,14 @@ def main():
 
         all_results[method] = method_results
 
-    # Print summary
+    # Print summary (scores scaled to 0-100 per LongBench standard)
     print("\n" + "=" * 80)
-    print("LONGBENCH EVALUATION RESULTS")
+    print("LONGBENCH EVALUATION RESULTS (scores in %)")
     print("=" * 80)
     print(f"Model: {args.model_name}")
     print(f"Tasks: {tasks}")
     print(f"Samples per task: {args.num_samples}")
-    print(f"Window size: {args.window_size} (8:1 compression)")
+    print(f"Window size: {args.window_size} ({args.window_size}:1 compression)")
     print("-" * 80)
 
     # Results table
@@ -869,21 +1210,37 @@ def main():
     for method, results in all_results.items():
         row = f"{method:<15}"
         for task in tasks:
-            score = results.get(task, {}).get("score", 0)
-            row += f" {score:>12.3f}"
-        avg = results.get("average", 0)
-        row += f" {avg:>10.3f}"
+            # Scale score to percentage (0-100) per LongBench standard
+            score = results.get(task, {}).get("score", 0) * 100
+            row += f" {score:>12.2f}"
+        avg = results.get("average", 0) * 100
+        row += f" {avg:>10.2f}"
         print(row)
 
     print("=" * 80)
 
-    # Save results
+    # Save results (scale scores to percentages for consistency)
     if args.output_file:
+        scaled_results = {}
+        for method, results in all_results.items():
+            scaled_results[method] = {}
+            for key, val in results.items():
+                if isinstance(val, dict) and "score" in val:
+                    scaled_results[method][key] = {
+                        **val,
+                        "score": round(val["score"] * 100, 2)
+                    }
+                elif key == "average":
+                    scaled_results[method][key] = round(val * 100, 2)
+                else:
+                    scaled_results[method][key] = val
+
         output = {
             "model": args.model_name,
             "tasks": tasks,
             "methods": methods,
-            "results": all_results,
+            "results": scaled_results,
+            "note": "Scores are in percentage (0-100) per LongBench standard",
         }
         with open(args.output_file, "w") as f:
             json.dump(output, f, indent=2)
