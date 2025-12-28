@@ -201,7 +201,8 @@ DATASET_PROMPTS = {
     "trec": (
         "Please determine the type of the question below. Here are some examples "
         "of questions.\n\n{context}\n\n"
-        "{input}"
+        "{input}\n"
+        "Type:"
     ),
     "triviaqa": (
         "Answer the question based on the given passage. Only give me the answer "
@@ -432,6 +433,7 @@ def load_longbench_task(task_name: str, num_samples: int | None = None) -> list[
                 "input": item.get("input", ""),
                 "context": item.get("context", ""),
                 "answers": item.get("answers", []),
+                "all_classes": item.get("all_classes", []),  # For classification tasks
             }
             # Ensure answers is a list
             if isinstance(sample["answers"], str):
@@ -558,14 +560,26 @@ def compress_cache_with_baseline(
     num_sink: int,
     num_recent: int,
     compression_ratio: float = 2.0,
+    max_capacity_prompt: int = 2048,
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:
     """
     Generic cache compression using baseline methods.
 
-    Uses compression_ratio for fair comparison with LST:
-    - compression_ratio=2.0 → keep 50% of tokens (matches LST window_size=2)
-    - compression_ratio=4.0 → keep 25% of tokens (matches LST window_size=4)
+    Args:
+        cache: List of (key, value) tuples per layer
+        method_name: Name of compression method
+        num_sink: Number of sink tokens to preserve
+        num_recent: Number of recent tokens to preserve
+        compression_ratio: Compression ratio for ratio-based methods
+        max_capacity_prompt: Max KV cache capacity for PyramidKV (official default: 2048)
+
+    Notes:
+        - PyramidKV uses max_capacity_prompt (official parameter) not compression_ratio
+        - Other methods use compression_ratio for fair comparison with LST
     """
+    num_layers = len(cache)
+
+    # Create method instance based on method name
     if method_name == "h2o":
         config = H2OConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
         method = H2O(config)
@@ -588,20 +602,29 @@ def compress_cache_with_baseline(
         config = SnapKVConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
         method = SnapKV(config)
     elif method_name == "pyramidkv":
-        config = PyramidKVConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
+        # PyramidKV uses official parameters from the paper
+        config = PyramidKVConfig(
+            num_sink=num_sink,
+            num_recent=num_recent,
+            num_layers=num_layers,
+            max_capacity_prompt=max_capacity_prompt,
+            window_size=32,  # Official default
+            beta=20,  # Official default
+        )
         method = PyramidKV(config)
     else:
         raise ValueError(f"Unknown method: {method_name}")
 
     compressed = []
 
-    for k, v in cache:
+    for layer_idx, (k, v) in enumerate(cache):
         B, H, S, D = k.shape
 
         k_flat = k.transpose(1, 2).reshape(B, S, H * D)
         v_flat = v.transpose(1, 2).reshape(B, S, H * D)
 
-        k_comp, v_comp = method.compress(k_flat, v_flat)
+        # Pass layer_idx for layer-aware methods like PyramidKV
+        k_comp, v_comp = method.compress(k_flat, v_flat, layer_idx=layer_idx)
 
         S_new = k_comp.shape[1]
         k_comp = k_comp.view(B, S_new, H, D).transpose(1, 2)
@@ -771,10 +794,14 @@ def compute_classification_score(
         # Fallback to simple accuracy if no class list provided
         return _compute_accuracy_fallback(prediction, ground_truths)
 
+    # Normalize prediction for case-insensitive matching
+    prediction_upper = prediction.upper()
+
     # Find all class labels mentioned in prediction
     em_match_list = []
     for class_name in all_classes:
-        if class_name in prediction:
+        # Case-insensitive check
+        if class_name.upper() in prediction_upper:
             em_match_list.append(class_name)
 
     # Remove partial matches (e.g., if "ENTITY" matches but ground truth is "ENTITY:PERSON")
@@ -961,6 +988,7 @@ def evaluate_sample(
     num_sink: int,
     num_recent: int,
     max_context_length: int,
+    max_capacity_prompt: int = 2048,
     debug: bool = False,
 ) -> tuple[float, str]:
     """
@@ -979,6 +1007,7 @@ def evaluate_sample(
         num_sink: Number of sink tokens
         num_recent: Number of recent tokens
         max_context_length: Maximum context length
+        max_capacity_prompt: Max KV cache capacity for PyramidKV
         debug: If True, print debug information
 
     Returns:
@@ -1063,7 +1092,9 @@ def evaluate_sample(
             compressed = compress_cache_mean(cache, window_size, num_sink, num_recent)
         else:
             compressed = compress_cache_with_baseline(
-                cache, method, num_sink, num_recent, compression_ratio=float(window_size)
+                cache, method, num_sink, num_recent,
+                compression_ratio=float(window_size),
+                max_capacity_prompt=max_capacity_prompt,
             )
 
         # Generate with compressed cache
@@ -1131,8 +1162,10 @@ def evaluate_sample(
     elif metric == "rouge":
         score = compute_rouge_l(processed_response, answers)
     elif metric == "classification":
-        # Use TREC classes for trec task, otherwise fall back
-        all_classes = TREC_CLASSES if task_name == "trec" else None
+        # Use all_classes from sample data, fall back to TREC_CLASSES
+        all_classes = sample.get("all_classes", [])
+        if not all_classes:
+            all_classes = TREC_CLASSES if task_name == "trec" else None
         score = compute_classification_score(processed_response, answers, all_classes)
     elif metric == "count":
         score = compute_count_score(processed_response, answers)
@@ -1158,6 +1191,7 @@ def evaluate_task(
     num_recent: int,
     num_samples: int,
     max_context_length: int,
+    max_capacity_prompt: int = 2048,
     debug: bool = False,
 ) -> dict:
     """Evaluate a single LongBench task."""
@@ -1186,6 +1220,7 @@ def evaluate_task(
                 num_sink,
                 num_recent,
                 max_context_length,
+                max_capacity_prompt=max_capacity_prompt,
                 debug=sample_debug,
             )
             scores.append(score)
@@ -1231,9 +1266,15 @@ def main():
         default=None,
         help="Max context length (auto-detected from model if not specified)",
     )
-    parser.add_argument("--window_size", type=int, default=8, help="Compression window size")
+    parser.add_argument("--window_size", type=int, default=8, help="Compression window size for LST/mean")
     parser.add_argument("--num_sink", type=int, default=4, help="Number of sink tokens")
     parser.add_argument("--num_recent", type=int, default=8, help="Number of recent tokens")
+    parser.add_argument(
+        "--max_capacity_prompt",
+        type=int,
+        default=2048,
+        help="Max KV cache capacity for PyramidKV (official default: 2048)",
+    )
     parser.add_argument("--output_file", type=str, default=None, help="Save results to JSON")
     parser.add_argument("--debug", action="store_true", help="Enable debug output for first few samples")
 
@@ -1295,6 +1336,7 @@ def main():
                     args.num_recent,
                     args.num_samples,
                     max_context_length,
+                    max_capacity_prompt=args.max_capacity_prompt,
                     debug=args.debug,
                 )
                 method_results[task] = result

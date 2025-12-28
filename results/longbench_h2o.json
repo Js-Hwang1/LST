@@ -1,0 +1,86 @@
+{
+  "model": "mistralai/Mistral-7B-Instruct-v0.2",
+  "tasks": [
+    "qasper",
+    "multifieldqa_en",
+    "hotpotqa",
+    "2wikimqa",
+    "musique",
+    "gov_report",
+    "multi_news",
+    "trec",
+    "triviaqa",
+    "samsum",
+    "lcc",
+    "repobench-p"
+  ],
+  "methods": [
+    "h2o"
+  ],
+  "results": {
+    "h2o": {
+      "qasper": {
+        "score": 5.91,
+        "n_samples": 100,
+        "metric": "f1"
+      },
+      "multifieldqa_en": {
+        "score": 13.4,
+        "n_samples": 100,
+        "metric": "f1"
+      },
+      "hotpotqa": {
+        "score": 2.91,
+        "n_samples": 100,
+        "metric": "f1"
+      },
+      "2wikimqa": {
+        "score": 8.51,
+        "n_samples": 100,
+        "metric": "f1"
+      },
+      "musique": {
+        "score": 2.12,
+        "n_samples": 100,
+        "metric": "f1"
+      },
+      "gov_report": {
+        "score": 11.88,
+        "n_samples": 100,
+        "metric": "rouge"
+      },
+      "multi_news": {
+        "score": 14.3,
+        "n_samples": 100,
+        "metric": "rouge"
+      },
+      "trec": {
+        "score": 0.0,
+        "n_samples": 100,
+        "metric": "classification"
+      },
+      "triviaqa": {
+        "score": 10.16,
+        "n_samples": 100,
+        "metric": "f1"
+      },
+      "samsum": {
+        "score": 5.19,
+        "n_samples": 100,
+        "metric": "rouge"
+      },
+      "lcc": {
+        "score": 23.36,
+        "n_samples": 100,
+        "metric": "code_sim"
+      },
+      "repobench-p": {
+        "score": 21.27,
+        "n_samples": 100,
+        "metric": "code_sim"
+      },
+      "average": 9.92
+    }
+  },
+  "note": "Scores are in percentage (0-100) per LongBench standard"
+}

@@ -15,10 +15,7 @@ Algorithm:
    - Lower layers: larger budget (attention scattered)
    - Upper layers: smaller budget (attention focused on sinks)
 2. Within each layer, select important KV vectors based on attention scores
-3. Use arithmetic progression for layer budget allocation
-
-Key insight: Since upper layers focus on fewer critical tokens anyway,
-we can safely reduce their cache size without losing information.
+3. Always preserve a window of recent tokens
 
 Faithful implementation based on:
 - Paper: https://arxiv.org/abs/2406.02069
@@ -29,6 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from .base import CompressionConfig, CompressionMethod
@@ -36,38 +34,39 @@ from .base import CompressionConfig, CompressionMethod
 
 @dataclass
 class PyramidKVConfig(CompressionConfig):
-    """PyramidKV-specific configuration."""
+    """PyramidKV-specific configuration matching official implementation."""
 
     # Total number of layers in the model
     num_layers: int = 32
 
-    # Ratio of budget allocated to lowest vs highest layer
-    # Higher = steeper pyramid (more budget in lower layers)
-    pyramid_ratio: float = 2.0
+    # Maximum capacity per layer (official default: 2048)
+    # This is the BASE capacity that gets modified by pyramid allocation
+    max_capacity_prompt: int = 2048
 
-    # Whether to use SnapKV-style attention for selection within each layer
-    use_attention_selection: bool = True
+    # Window size for recent tokens always preserved (official default: 32)
+    window_size: int = 32
+
+    # Beta parameter controlling pyramid steepness (official default: 20)
+    # Higher beta = flatter pyramid (more uniform allocation)
+    # Lower beta = steeper pyramid (more difference between layers)
+    beta: int = 20
+
+    # Kernel size for attention pooling (official default: 5)
+    kernel_size: int = 5
+
+    # Pooling method: 'avgpool' or 'maxpool'
+    pooling: str = "avgpool"
 
 
 class PyramidKV(CompressionMethod):
     """
     PyramidKV: Layer-wise Dynamic KV Cache Compression.
 
-    Strategy:
-    1. Distribute total budget across layers using pyramid allocation
-       - Lower layers get more budget (attention is scattered)
-       - Upper layers get less budget (attention focuses on sinks)
-    2. Within each layer, select most important tokens based on:
-       - Attention scores if available
-       - Key norms as proxy otherwise
-
-    The pyramid allocation uses arithmetic progression:
-    budget[layer] = base + (num_layers - 1 - layer) * step
-
-    This ensures:
-    - Layer 0 gets the most budget
-    - Layer num_layers-1 gets the least budget
-    - Total budget matches target compression ratio
+    This implementation follows the official KVCache-Factory code:
+    - Uses beta parameter to control pyramid allocation
+    - Allocates more cache to lower layers, less to upper layers
+    - Uses attention-based token selection with pooling
+    - Always preserves a window of recent tokens
     """
 
     def __init__(self, config: PyramidKVConfig):
@@ -78,156 +77,112 @@ class PyramidKV(CompressionMethod):
     def name(self) -> str:
         return "PyramidKV"
 
-    def compute_layer_budgets(
-        self,
-        total_budget: int,
-        num_layers: int,
-        seq_len: int,
-    ) -> list[int]:
+    def compute_layer_capacity(self, layer_idx: int) -> int:
         """
-        Compute per-layer KV cache budgets using pyramid allocation.
+        Compute the KV cache capacity for a specific layer.
 
-        Uses arithmetic progression where:
-        - Layer 0 (lowest) gets max_budget
-        - Layer num_layers-1 (highest) gets min_budget
-        - Sum of all budgets = total_budget
+        Uses the official PyramidKV formula:
+        - min_num = (max_capacity_prompt - window_size) // beta
+        - max_num = (max_capacity_prompt - window_size) * 2 - min_num
+        - steps = (max_num - min_num) // (num_layers - 1)
+        - capacity = max_num - layer_idx * steps
 
         Args:
-            total_budget: Total number of KV pairs to retain across all layers
-            num_layers: Number of transformer layers
-            seq_len: Original sequence length
+            layer_idx: Index of the current layer (0-indexed)
 
         Returns:
-            List of budgets for each layer
+            Number of KV pairs to retain for this layer
         """
-        ratio = self.pyramid_config.pyramid_ratio
+        config = self.pyramid_config
+        base = config.max_capacity_prompt - config.window_size
 
-        # For arithmetic progression: a_i = a_0 - i * d
-        # where a_0 is the largest (layer 0), a_{n-1} is smallest
-        # Sum = n * (a_0 + a_{n-1}) / 2 = total_budget
-        # a_0 / a_{n-1} = ratio
+        if base <= 0:
+            return config.max_capacity_prompt
 
-        # Let a_{n-1} = min_budget, a_0 = ratio * min_budget
-        # Sum = n * min_budget * (1 + ratio) / 2 = total_budget
-        # min_budget = 2 * total_budget / (n * (1 + ratio))
+        min_num = base // config.beta
+        max_num = base * 2 - min_num
 
-        min_budget = 2 * total_budget / (num_layers * (1 + ratio))
-        max_budget = ratio * min_budget
-
-        # Step size for arithmetic progression
-        if num_layers > 1:
-            step = (max_budget - min_budget) / (num_layers - 1)
+        if config.num_layers > 1:
+            steps = (max_num - min_num) // (config.num_layers - 1)
         else:
-            step = 0
+            steps = 0
 
-        # Compute per-layer budgets
-        budgets = []
-        for layer_idx in range(num_layers):
-            budget = max_budget - layer_idx * step
-            # Ensure minimum of num_sink + num_recent
-            min_required = self.config.num_sink + self.config.num_recent + 1
-            budget = max(min_required, int(budget))
-            # Don't exceed sequence length
-            budget = min(budget, seq_len)
-            budgets.append(budget)
+        # Layer 0 gets max_num, last layer gets closer to min_num
+        capacity = max_num - layer_idx * steps
 
-        return budgets
+        # Add back window_size and ensure minimum
+        capacity = max(capacity, min_num) + config.window_size
 
-    def compress_single_layer(
+        return int(capacity)
+
+    def compute_attention_scores(
         self,
         keys: Tensor,
-        values: Tensor,
-        budget: int,
-        attention_scores: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor]:
+        queries: Tensor | None = None,
+    ) -> Tensor:
         """
-        Compress a single layer's KV cache to the given budget.
+        Compute attention-based importance scores for tokens.
+
+        If queries provided, compute attention between queries and keys.
+        Otherwise, use key norms as a proxy for importance.
 
         Args:
-            keys: (batch, seq_len, d_head)
-            values: (batch, seq_len, d_head)
-            budget: Number of tokens to retain
-            attention_scores: Optional attention weights
+            keys: (batch, seq_len, d_model)
+            queries: Optional query tensor for attention computation
 
         Returns:
-            Compressed (keys, values)
+            Importance scores (batch, seq_len)
         """
-        batch_size, seq_len, d_head = keys.shape
-
-        if seq_len <= budget:
-            return keys, values
-
-        num_sink = self.config.num_sink
-        num_recent = self.config.num_recent
-
-        # Compute importance scores
-        if attention_scores is not None and attention_scores.dim() >= 2:
-            if attention_scores.dim() == 4:
-                # (batch, heads, seq, seq) -> aggregate
-                importance = attention_scores.mean(dim=1).sum(dim=1)
-            elif attention_scores.dim() == 2:
-                importance = attention_scores
-            else:
-                importance = keys.norm(dim=-1)
+        if queries is not None and queries.numel() > 0:
+            # Compute attention scores
+            # queries: (batch, q_len, d_model)
+            # keys: (batch, k_len, d_model)
+            attn = torch.matmul(queries, keys.transpose(-1, -2))
+            attn = attn / (keys.shape[-1] ** 0.5)
+            attn = F.softmax(attn, dim=-1)
+            # Sum attention over query positions
+            importance = attn.sum(dim=1)  # (batch, k_len)
         else:
-            # Use key norms as proxy
+            # Use key norms as importance proxy
             importance = keys.norm(dim=-1)
 
-        # Protect sink and recent
-        protected_importance = importance.clone()
-        protected_importance[:, :num_sink] = float("inf")
-        if num_recent > 0:
-            protected_importance[:, -num_recent:] = float("inf")
+        return importance
 
-        # Select top tokens from middle
-        middle_budget = budget - num_sink - num_recent
-        middle_budget = max(0, middle_budget)
+    def apply_pooling(self, importance: Tensor) -> Tensor:
+        """
+        Apply pooling to importance scores (official PyramidKV uses this).
 
-        if middle_budget <= 0:
-            # Only keep sink and recent
-            k_sink = keys[:, :num_sink, :]
-            v_sink = values[:, :num_sink, :]
-            k_recent = keys[:, -num_recent:, :] if num_recent > 0 else keys[:, seq_len:, :]
-            v_recent = values[:, -num_recent:, :] if num_recent > 0 else values[:, seq_len:, :]
-            return torch.cat([k_sink, k_recent], dim=1), torch.cat([v_sink, v_recent], dim=1)
+        Args:
+            importance: (batch, seq_len)
 
-        # Get middle importance (exclude sink and recent)
-        middle_start = num_sink
-        middle_end = seq_len - num_recent if num_recent > 0 else seq_len
-        middle_importance = importance[:, middle_start:middle_end]
+        Returns:
+            Pooled importance scores
+        """
+        config = self.pyramid_config
+        kernel_size = config.kernel_size
 
-        middle_len = middle_end - middle_start
-        if middle_len <= middle_budget:
-            # Keep all middle tokens
-            return keys, values
+        if kernel_size <= 1:
+            return importance
 
-        # Select top-k from middle
-        _, top_indices = middle_importance.topk(middle_budget, dim=-1)
-        top_indices, _ = top_indices.sort(dim=-1)  # Preserve order
+        # Add channel dimension for pooling
+        importance = importance.unsqueeze(1)  # (batch, 1, seq_len)
 
-        # Shift to absolute indices
-        top_indices = top_indices + middle_start
+        if config.pooling == "avgpool":
+            pooled = F.avg_pool1d(
+                importance,
+                kernel_size=kernel_size,
+                stride=1,
+                padding=kernel_size // 2,
+            )
+        else:  # maxpool
+            pooled = F.max_pool1d(
+                importance,
+                kernel_size=kernel_size,
+                stride=1,
+                padding=kernel_size // 2,
+            )
 
-        # Build index set
-        sink_indices = torch.arange(num_sink, device=keys.device).unsqueeze(0).expand(batch_size, -1)
-        recent_indices = (
-            torch.arange(seq_len - num_recent, seq_len, device=keys.device)
-            .unsqueeze(0)
-            .expand(batch_size, -1)
-        ) if num_recent > 0 else torch.empty(batch_size, 0, dtype=torch.long, device=keys.device)
-
-        all_indices = torch.cat([sink_indices, top_indices, recent_indices], dim=-1)
-        all_indices, _ = all_indices.sort(dim=-1)
-
-        # Gather
-        keys_out = torch.gather(
-            keys, dim=1, index=all_indices.unsqueeze(-1).expand(-1, -1, d_head)
-        )
-        values_out = torch.gather(
-            values, dim=1, index=all_indices.unsqueeze(-1).expand(-1, -1, d_head)
-        )
-
-        return keys_out, values_out
+        return pooled.squeeze(1)  # (batch, seq_len)
 
     def compress(
         self,
@@ -240,79 +195,140 @@ class PyramidKV(CompressionMethod):
         """
         Compress KV cache using PyramidKV algorithm.
 
-        Note: For full PyramidKV, this should be called per-layer with layer_idx.
-        For post-hoc compression of full cache, we apply average budget.
-
         Args:
-            keys: Key tensor (batch, seq_len, d_head) or (batch, n_heads, seq_len, d_head)
+            keys: Key tensor (batch, seq_len, d_model) or (batch, n_heads, seq_len, d_head)
             values: Value tensor with same shape as keys
-            attention_scores: Optional attention weights
-            layer_idx: Current layer index (for per-layer budget allocation)
+            attention_scores: Optional pre-computed attention scores
+            layer_idx: Current layer index for pyramid allocation
 
         Returns:
             Tuple of (compressed_keys, compressed_values)
         """
+        config = self.pyramid_config
+
+        # Handle 4D input (batch, n_heads, seq_len, d_head)
         is_4d = keys.dim() == 4
         if is_4d:
             batch_size, n_heads, seq_len, d_head = keys.shape
             keys = keys.transpose(1, 2).reshape(batch_size, seq_len, n_heads * d_head)
             values = values.transpose(1, 2).reshape(batch_size, seq_len, n_heads * d_head)
         else:
-            batch_size, seq_len, d_head = keys.shape
+            batch_size, seq_len, d_model = keys.shape
+            n_heads = None
 
-        # Get base budget
-        base_budget = self.get_budget(seq_len)
+        # Get layer-specific capacity
+        capacity = self.compute_layer_capacity(layer_idx)
 
-        if seq_len <= base_budget:
+        # If sequence is shorter than capacity, return as-is
+        if seq_len <= capacity:
             if is_4d:
                 keys = keys.view(batch_size, seq_len, n_heads, -1).transpose(1, 2)
                 values = values.view(batch_size, seq_len, n_heads, -1).transpose(1, 2)
             return keys, values
 
-        # Compute layer-specific budget if layer_idx is meaningful
-        num_layers = self.pyramid_config.num_layers
-        layer_budgets = self.compute_layer_budgets(
-            total_budget=base_budget * num_layers,
-            num_layers=num_layers,
-            seq_len=seq_len,
-        )
-
-        # Use budget for this layer
-        if 0 <= layer_idx < len(layer_budgets):
-            budget = layer_budgets[layer_idx]
+        # Compute importance scores
+        if attention_scores is not None:
+            if attention_scores.dim() == 4:
+                # (batch, heads, q_len, k_len) -> (batch, k_len)
+                importance = attention_scores.mean(dim=1).sum(dim=1)
+            elif attention_scores.dim() == 2:
+                importance = attention_scores
+            else:
+                importance = self.compute_attention_scores(keys)
         else:
-            budget = base_budget
+            importance = self.compute_attention_scores(keys)
 
-        # Compress this layer
-        keys_out, values_out = self.compress_single_layer(
-            keys, values, budget, attention_scores
-        )
+        # Apply pooling for smoother selection
+        importance = self.apply_pooling(importance)
 
+        # Determine how many tokens to select from middle
+        window_size = config.window_size
+        num_sink = self.config.num_sink
+
+        # Tokens to select = capacity - window_size - num_sink
+        num_to_select = capacity - window_size - num_sink
+        num_to_select = max(0, num_to_select)
+
+        if num_to_select == 0:
+            # Only keep sink and recent window
+            k_out = torch.cat([keys[:, :num_sink], keys[:, -window_size:]], dim=1)
+            v_out = torch.cat([values[:, :num_sink], values[:, -window_size:]], dim=1)
+        else:
+            # Protect sink and recent tokens from selection
+            middle_start = num_sink
+            middle_end = seq_len - window_size
+
+            if middle_end <= middle_start:
+                # Not enough middle tokens, keep all
+                k_out = keys
+                v_out = values
+            else:
+                # Get importance of middle tokens
+                middle_importance = importance[:, middle_start:middle_end]
+                middle_len = middle_end - middle_start
+
+                if num_to_select >= middle_len:
+                    # Keep all middle tokens
+                    k_out = keys
+                    v_out = values
+                else:
+                    # Select top-k from middle based on importance
+                    _, top_indices = middle_importance.topk(
+                        min(num_to_select, middle_len), dim=-1
+                    )
+                    top_indices, _ = top_indices.sort(dim=-1)  # Preserve order
+
+                    # Shift to absolute indices
+                    top_indices = top_indices + middle_start
+
+                    # Build complete index set: sink + selected + recent
+                    sink_idx = torch.arange(num_sink, device=keys.device)
+                    sink_idx = sink_idx.unsqueeze(0).expand(batch_size, -1)
+
+                    recent_idx = torch.arange(
+                        seq_len - window_size, seq_len, device=keys.device
+                    )
+                    recent_idx = recent_idx.unsqueeze(0).expand(batch_size, -1)
+
+                    all_indices = torch.cat([sink_idx, top_indices, recent_idx], dim=-1)
+                    all_indices, _ = all_indices.sort(dim=-1)
+
+                    # Gather compressed cache
+                    d = keys.shape[-1]
+                    k_out = torch.gather(
+                        keys, dim=1, index=all_indices.unsqueeze(-1).expand(-1, -1, d)
+                    )
+                    v_out = torch.gather(
+                        values, dim=1, index=all_indices.unsqueeze(-1).expand(-1, -1, d)
+                    )
+
+        # Reshape back to 4D if needed
         if is_4d:
-            out_len = keys_out.shape[1]
-            keys_out = keys_out.view(batch_size, out_len, n_heads, -1).transpose(1, 2)
-            values_out = values_out.view(batch_size, out_len, n_heads, -1).transpose(1, 2)
+            out_len = k_out.shape[1]
+            k_out = k_out.view(batch_size, out_len, n_heads, -1).transpose(1, 2)
+            v_out = v_out.view(batch_size, out_len, n_heads, -1).transpose(1, 2)
 
-        return keys_out, values_out
+        return k_out, v_out
 
 
 def pyramidkv_compress(
     keys: Tensor,
     values: Tensor,
-    budget: int,
     layer_idx: int = 0,
     num_layers: int = 32,
-    pyramid_ratio: float = 2.0,
+    max_capacity_prompt: int = 2048,
+    window_size: int = 32,
+    beta: int = 20,
     num_sink: int = 4,
-    num_recent: int = 8,
 ) -> tuple[Tensor, Tensor]:
     """Standalone PyramidKV function for testing."""
     config = PyramidKVConfig(
         num_sink=num_sink,
-        num_recent=num_recent,
-        budget=budget,
+        num_recent=window_size,  # Use window_size as num_recent for compatibility
         num_layers=num_layers,
-        pyramid_ratio=pyramid_ratio,
+        max_capacity_prompt=max_capacity_prompt,
+        window_size=window_size,
+        beta=beta,
     )
     method = PyramidKV(config)
     return method.compress(keys, values, layer_idx=layer_idx)
