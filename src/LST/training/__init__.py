@@ -6,17 +6,17 @@ Training utilities for Learned Super-Token compression.
 
 Components:
     - Trainer: Main training loop with multi-objective loss
-    - TextDataset: Efficient text dataset (on-the-fly tokenization)
+    - LongTextDataset: Dataset for long-context training (booksum, etc.)
     - CachedTextDataset: Fast dataset from pre-tokenized files
     - TrainingConfig: Configuration dataclass
 """
 
-from .dataset import CachedTextDataset, TextDataset, create_dataloaders
+from .dataset import CachedTextDataset, LongTextDataset, create_dataloaders
 from .trainer import LSTTrainer
 
 __all__ = [
     "LSTTrainer",
-    "TextDataset",
+    "LongTextDataset",
     "CachedTextDataset",
     "create_dataloaders",
 ]
