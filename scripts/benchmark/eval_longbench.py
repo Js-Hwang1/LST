@@ -304,28 +304,20 @@ def get_model_max_length(model_name: str) -> int:
 
 def build_chat(tokenizer, prompt: str, model_name: str) -> str:
     """
-    Build chat prompt following KVCache-Factory's approach.
+    Build chat prompt following KVCache-Factory's EXACT approach.
 
-    For instruction-tuned models, wraps in appropriate chat format.
+    IMPORTANT: KVCache-Factory only applies [INST] wrapper for llama2 models,
+    NOT for Mistral or other models. This matches their run_longbench.py exactly.
+
+    Reference: https://github.com/Zefan-Cai/KVCache-Factory/blob/main/run_longbench.py
     """
     model_name_lower = model_name.lower()
 
-    # Try using the tokenizer's chat template first
-    if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is not None:
-        try:
-            messages = [{"role": "user", "content": prompt}]
-            return tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
-        except Exception:
-            pass
-
-    # Fallback: manual chat formatting for known models
+    # KVCache-Factory ONLY applies chat format for llama2
     if "llama2" in model_name_lower or "llama-2" in model_name_lower:
         return f"[INST] {prompt} [/INST]"
-    elif "mistral" in model_name_lower or "mixtral" in model_name_lower:
-        return f"[INST] {prompt} [/INST]"
 
+    # For all other models (including Mistral), return raw prompt
     return prompt
 
 
@@ -812,47 +804,52 @@ def _compute_rouge_l_fallback(prediction: str, ground_truths: list[str]) -> floa
     return best_score
 
 
+def classification_score(prediction: str, ground_truth: str, all_classes: list[str]) -> float:
+    """
+    Compute classification score - exact match of KVCache-Factory's metrics.py.
+
+    Reference: https://github.com/Zefan-Cai/KVCache-Factory/blob/main/metrics.py
+
+    Args:
+        prediction: Model's output (single string)
+        ground_truth: Single correct answer (string, not list)
+        all_classes: List of all possible class labels
+    """
+    em_match_list = []
+    for class_name in all_classes:
+        if class_name in prediction:  # Case-sensitive, exact match of their code
+            em_match_list.append(class_name)
+
+    for match_term in em_match_list:
+        if match_term in ground_truth and match_term != ground_truth:
+            em_match_list.remove(match_term)
+
+    if ground_truth in em_match_list:
+        score = 1.0 / len(em_match_list)
+    else:
+        score = 0.0
+
+    return score
+
+
 def compute_classification_score(
     prediction: str, ground_truths: list[str], all_classes: list[str] | None = None
 ) -> float:
     """
-    Compute classification score (official LongBench standard).
+    Wrapper that matches KVCache-Factory's eval.py calling pattern.
 
-    Uses precision-penalized matching: if multiple class labels appear in
-    the prediction, the score is reduced proportionally.
-
-    Args:
-        prediction: Model's output
-        ground_truths: List of correct answers
-        all_classes: List of all possible class labels for this task
+    They iterate through ground_truths and take the MAX score.
     """
-    if all_classes is None:
-        # Fallback to simple accuracy if no class list provided
+    if all_classes is None or not all_classes:
         return _compute_accuracy_fallback(prediction, ground_truths)
 
-    # Normalize prediction for case-insensitive matching
-    prediction_upper = prediction.upper()
+    # Match their eval.py: iterate through ground_truths and take max
+    max_score = 0.0
+    for ground_truth in ground_truths:
+        score = classification_score(prediction, ground_truth, all_classes)
+        max_score = max(max_score, score)
 
-    # Find all class labels mentioned in prediction
-    em_match_list = []
-    for class_name in all_classes:
-        # Case-insensitive check
-        if class_name.upper() in prediction_upper:
-            em_match_list.append(class_name)
-
-    # Remove partial matches (e.g., if "ENTITY" matches but ground truth is "ENTITY:PERSON")
-    for match_term in em_match_list.copy():
-        for gt in ground_truths:
-            if match_term in gt and match_term != gt:
-                if match_term in em_match_list:
-                    em_match_list.remove(match_term)
-
-    # Check if ground truth is among matches, penalize for multiple matches
-    for gt in ground_truths:
-        if gt in em_match_list:
-            return 1.0 / len(em_match_list)
-
-    return 0.0
+    return max_score
 
 
 def _compute_accuracy_fallback(prediction: str, ground_truths: list[str]) -> float:
@@ -1179,12 +1176,13 @@ def evaluate_sample(
             skip_special_tokens=True,
         ).strip()
 
-    if debug:
-        logger.info(f"Generated response: {response[:200]}...")
-        logger.info(f"Expected answers: {sample.get('answers', [])[:3]}")
-
     # Apply task-specific preprocessing (official LongBench standard)
     processed_response = preprocess_prediction(response, task_name)
+
+    if debug:
+        logger.info(f"Raw response: {response[:200]}...")
+        logger.info(f"Processed response: {processed_response[:100]}")
+        logger.info(f"Expected answers: {sample.get('answers', [])[:3]}")
 
     # Compute score based on metric
     answers = sample.get("answers", [])
@@ -1202,6 +1200,10 @@ def evaluate_sample(
         if not all_classes:
             all_classes = TREC_CLASSES if task_name == "trec" else None
         score = compute_classification_score(processed_response, answers, all_classes)
+        if debug:
+            # Show which classes matched
+            matched = [c for c in (all_classes or []) if c in processed_response]
+            logger.info(f"Matched classes: {matched}, Score: {score}")
     elif metric == "count":
         score = compute_count_score(processed_response, answers)
     elif metric == "retrieval":
