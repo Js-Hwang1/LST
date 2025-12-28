@@ -726,51 +726,46 @@ def run_prefill_with_query_capture(
 ) -> tuple[list[tuple[torch.Tensor, torch.Tensor]], list[torch.Tensor]]:
     """
     Run model prefill and capture both KV cache and query states.
-
-    This is needed for KVCache-Factory compatible compression methods
-    which require access to query states for computing attention scores.
-
-    Args:
-        model: The language model
-        input_ids: Input token IDs (B, S)
-        attention_mask: Optional attention mask
-
-    Returns:
-        Tuple of (cache, queries) where:
-        - cache: List of (key, value) tuples per layer
-        - queries: List of query tensors per layer
+    Works with Llama, Mistral, Qwen, and other HF models.
     """
     device = input_ids.device
     queries_per_layer = []
 
-    # Hook to capture query projections
+    # Get model config for num_heads/head_dim
+    config = model.config
+    num_heads = getattr(config, 'num_attention_heads', None)
+    head_dim = getattr(config, 'head_dim', None)
+    if head_dim is None and num_heads:
+        head_dim = config.hidden_size // num_heads
+
     handles = []
 
     def make_hook(layer_idx):
         def hook_fn(module, args, kwargs, output):
-            # Extract query states from the attention output
-            # For most HF models, we can recompute queries from hidden states
             hidden_states = args[0] if args else kwargs.get('hidden_states')
             if hidden_states is not None and hasattr(module, 'q_proj'):
-                # Compute query projection
                 bsz, seq_len, _ = hidden_states.shape
                 q = module.q_proj(hidden_states)
-                # Reshape to (B, H, S, D)
-                num_heads = module.num_heads
-                head_dim = module.head_dim
-                q = q.view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
-                queries_per_layer.append((layer_idx, q.detach()))
+
+                # Get num_heads from module or config (different models use different attrs)
+                n_heads = getattr(module, 'num_heads', None) or \
+                          getattr(module, 'num_attention_heads', None) or \
+                          num_heads
+                h_dim = getattr(module, 'head_dim', None) or head_dim
+
+                if n_heads and h_dim:
+                    q = q.view(bsz, seq_len, n_heads, h_dim).transpose(1, 2)
+                    queries_per_layer.append((layer_idx, q.detach()))
         return hook_fn
 
     # Register hooks on all attention layers
     layer_idx = 0
     for name, module in model.named_modules():
-        if hasattr(module, 'q_proj') and 'self_attn' in name:
+        if hasattr(module, 'q_proj') and ('self_attn' in name or 'attention' in name.lower()):
             handle = module.register_forward_hook(make_hook(layer_idx), with_kwargs=True)
             handles.append(handle)
             layer_idx += 1
 
-    # Run forward pass
     with torch.no_grad():
         if attention_mask is not None:
             outputs = model(input_ids, attention_mask=attention_mask, use_cache=True)
@@ -778,25 +773,17 @@ def run_prefill_with_query_capture(
             outputs = model(input_ids, use_cache=True)
         past_kv = outputs.past_key_values
 
-    # Remove hooks
     for handle in handles:
         handle.remove()
 
-    # Convert cache to list of tuples
     if hasattr(past_kv, "key_cache"):
-        cache = [
-            (past_kv.key_cache[i], past_kv.value_cache[i])
-            for i in range(len(past_kv.key_cache))
-        ]
+        cache = [(past_kv.key_cache[i], past_kv.value_cache[i]) for i in range(len(past_kv.key_cache))]
     else:
         cache = list(past_kv)
 
-    # Sort queries by layer index and extract tensors
     queries_per_layer.sort(key=lambda x: x[0])
     queries = [q for _, q in queries_per_layer]
 
-    # If hook capture failed, fall back to using keys as proxy for queries
-    # (less accurate but still works for evaluation)
     if len(queries) != len(cache):
         logger.warning(f"Query capture failed ({len(queries)} vs {len(cache)} layers), using keys as proxy")
         queries = [k.clone() for k, v in cache]
