@@ -23,10 +23,14 @@ class SidecarPPL(nn.Module):
     """
     Sidecar network for direct PPL training.
 
+    Supports variable window sizes for fixed-budget compression mode.
+    During training, window sizes are sampled from [min_window_size, max_window_size].
+    During inference, window_size is computed dynamically based on max_capacity_prompt.
+
     Architecture:
         Input: (batch, window_size, 2*d_head) - concatenated K and V
         -> Linear projection to hidden_dim
-        -> Positional embedding (learnable)
+        -> Positional embedding (learnable, up to max_window_size)
         -> TransformerEncoder (num_layers, 4 heads)
         -> Attention pooling with learned query
         -> Output projection to 2*d_head
@@ -42,7 +46,8 @@ class SidecarPPL(nn.Module):
     def __init__(
         self,
         d_head: int,
-        window_size: int,
+        max_window_size: int = 32,
+        min_window_size: int = 2,
         hidden_dim: int = 256,
         num_encoder_layers: int = 2,
         num_heads: int = 4,
@@ -50,14 +55,15 @@ class SidecarPPL(nn.Module):
     ):
         super().__init__()
         self.d_head = d_head
-        self.window_size = window_size
+        self.min_window_size = min_window_size
+        self.max_window_size = max_window_size
         self.hidden_dim = hidden_dim
 
         # Input projection
         self.input_proj = nn.Linear(2 * d_head, hidden_dim)
 
-        # Learnable positional embedding
-        self.pos_embed = nn.Parameter(torch.randn(1, window_size, hidden_dim) * 0.02)
+        # Learnable positional embedding (allocate for max window size)
+        self.pos_embed = nn.Parameter(torch.randn(1, max_window_size, hidden_dim) * 0.02)
 
         # Transformer encoder
         encoder_layer = nn.TransformerEncoderLayer(
@@ -96,14 +102,18 @@ class SidecarPPL(nn.Module):
         """
         Compress a window of KV pairs to a single super-token.
 
+        Supports variable window sizes up to max_window_size.
+
         Args:
             kv_window: (batch, window_size, 2*d_head) - concatenated K and V
+                       window_size can be any value <= max_window_size
 
         Returns:
             k_out: (batch, d_head) - compressed key
             v_out: (batch, d_head) - compressed value
         """
         B, W, _ = kv_window.shape
+        assert W <= self.max_window_size, f"Window size {W} exceeds max {self.max_window_size}"
 
         # Compute mean for residual connection (baseline)
         kv_mean = kv_window.mean(dim=1)
@@ -116,7 +126,7 @@ class SidecarPPL(nn.Module):
         k_norm = k_input.norm(dim=-1).mean(dim=1, keepdim=True)  # (B, 1)
         v_norm = v_input.norm(dim=-1).mean(dim=1, keepdim=True)  # (B, 1)
 
-        # Encode with transformer
+        # Encode with transformer (slice positional embeddings to actual window size)
         x = self.input_proj(kv_window) + self.pos_embed[:, :W, :]
         x = self.encoder(x)
 
@@ -158,7 +168,8 @@ class Sidecar(nn.Module):
         # Use SidecarPPL internally
         self.network = SidecarPPL(
             d_head=config.d_head,
-            window_size=config.window_size,
+            max_window_size=config.max_window_size,
+            min_window_size=config.min_window_size,
             hidden_dim=config.encoder_hidden_dim,
             num_encoder_layers=config.encoder_num_layers,
             num_heads=config.encoder_num_heads,
@@ -174,7 +185,7 @@ class Sidecar(nn.Module):
         Compress a window of K, V pairs.
 
         Args:
-            keys: (batch, window_size, d_head)
+            keys: (batch, window_size, d_head) - window_size can vary
             values: (batch, window_size, d_head)
 
         Returns:
@@ -194,23 +205,50 @@ class Sidecar(nn.Module):
 def compress_cache(
     cache: list[tuple[Tensor, Tensor]],
     sidecar: nn.Module,
-    window_size: int,
+    max_capacity_prompt: int,
     num_sink: int = 4,
     num_recent: int = 8,
 ) -> list[tuple[Tensor, Tensor]]:
     """
-    Compress a full KV cache using the sidecar.
+    Compress a full KV cache using the sidecar (fixed-budget mode).
+
+    Window size is computed dynamically to achieve the target output cache size.
 
     Args:
         cache: List of (K, V) tuples per layer, each (1, n_heads, seq_len, d_head)
-        sidecar: Trained sidecar module
-        window_size: Window size for compression
+        sidecar: Trained sidecar module (SidecarPPL or Sidecar)
+        max_capacity_prompt: Target output cache size
         num_sink: Number of sink tokens to preserve
         num_recent: Number of recent tokens to preserve
 
     Returns:
         List of (K_compressed, V_compressed) tuples
     """
+    if len(cache) == 0:
+        return cache
+
+    # Get sequence length from first layer
+    S = cache[0][0].shape[2]
+
+    # If already within budget, no compression needed
+    if S <= max_capacity_prompt:
+        return cache
+
+    # Compute window_size to achieve target output size
+    target_compressed = max_capacity_prompt - num_sink - num_recent
+    middle_tokens = S - num_sink - num_recent
+
+    if target_compressed <= 0 or middle_tokens <= 0:
+        return cache  # Cannot compress further
+
+    # window_size = ceil(middle_tokens / target_compressed)
+    window_size = (middle_tokens + target_compressed - 1) // target_compressed
+    # Clamp to sidecar's supported range
+    network = sidecar.network if hasattr(sidecar, 'network') else sidecar
+    max_ws = getattr(network, 'max_window_size', 32)
+    min_ws = getattr(network, 'min_window_size', 2)
+    window_size = max(min_ws, min(window_size, max_ws))
+
     new_cache = []
 
     for layer_idx in range(len(cache)):
@@ -257,8 +295,9 @@ def compress_cache(
 
         # Compress with sidecar
         kv_concat = torch.cat([km_flat, vm_flat], dim=-1)
+        network = sidecar.network if hasattr(sidecar, 'network') else sidecar
         with torch.no_grad():
-            k_comp, v_comp = sidecar.network(kv_concat)
+            k_comp, v_comp = network(kv_concat)
 
         # Reshape back: (B, H, num_windows, D)
         k_comp = k_comp.view(B, H, num_windows, D)

@@ -14,7 +14,6 @@ Features:
 
 import logging
 import os
-import random
 from dataclasses import dataclass
 
 import numpy as np
@@ -39,7 +38,14 @@ except ImportError:
 
 @dataclass
 class TrainerConfig:
-    """Training configuration."""
+    """Training configuration for fixed-budget LST training.
+
+    Window size is computed per-batch to simulate inference behavior,
+    ensuring train-test alignment.
+    """
+
+    # Target budget (REQUIRED)
+    max_capacity_prompt: int  # e.g., 512, 1024, 2048
 
     # Optimization
     learning_rate: float = 1e-3
@@ -56,9 +62,10 @@ class TrainerConfig:
     num_probes: int = 8
 
     # Compression
-    window_size: int = 8
     num_sink: int = 4
     num_recent: int = 8
+    min_window_size: int = 4
+    max_window_size: int = 32
 
     # Logging
     log_steps: int = 20
@@ -161,23 +168,51 @@ class LSTTrainer:
         else:
             self.d_head = model.config.hidden_size // model.config.num_attention_heads
 
+    def _compute_window_size(self, seq_len: int) -> int:
+        """Compute window size to achieve target max_capacity_prompt.
+
+        This mirrors inference behavior, ensuring train-test alignment.
+        """
+        target_compressed = (
+            self.config.max_capacity_prompt
+            - self.config.num_sink
+            - self.config.num_recent
+        )
+        middle_tokens = seq_len - self.config.num_sink - self.config.num_recent
+
+        if target_compressed <= 0 or middle_tokens <= 0:
+            return self.config.min_window_size
+
+        window_size = (middle_tokens + target_compressed - 1) // target_compressed
+        return max(self.config.min_window_size, min(window_size, self.config.max_window_size))
+
     def compress_cache(
         self,
         cache: list[tuple[Tensor, Tensor]],
+        seq_len: int | None = None,
     ) -> tuple[list[tuple[Tensor, Tensor]], Tensor | None]:
         """
         Compress KV cache with sidecar.
 
+        Args:
+            cache: List of (K, V) tuples per layer
+            seq_len: Sequence length for computing window size (required for fixed target mode)
+
         Returns:
             Tuple of (compressed_cache, super_tokens_flat)
         """
+        # Get seq_len from cache if not provided
+        if seq_len is None and cache:
+            seq_len = cache[0][0].shape[2]
+        window_size = self._compute_window_size(seq_len or 512)
+
         compressed = []
         all_super_tokens = []
 
         for k, v in cache:
             B, H, S, D = k.shape
 
-            if S <= self.config.num_sink + self.config.num_recent + self.config.window_size:
+            if S <= self.config.num_sink + self.config.num_recent + window_size:
                 compressed.append((k, v))
                 continue
 
@@ -190,22 +225,22 @@ class LSTTrainer:
             vm = v[:, :, self.config.num_sink : -self.config.num_recent, :]
 
             M = km.shape[2]
-            num_windows = M // self.config.window_size
+            num_windows = M // window_size
 
             if num_windows == 0:
                 compressed.append((k, v))
                 continue
 
             # Reshape windows
-            trim_len = num_windows * self.config.window_size
-            km_windows = km[:, :, :trim_len, :].view(B, H, num_windows, self.config.window_size, D)
-            vm_windows = vm[:, :, :trim_len, :].view(B, H, num_windows, self.config.window_size, D)
+            trim_len = num_windows * window_size
+            km_windows = km[:, :, :trim_len, :].view(B, H, num_windows, window_size, D)
+            vm_windows = vm[:, :, :trim_len, :].view(B, H, num_windows, window_size, D)
             km_leftover = km[:, :, trim_len:, :]
             vm_leftover = vm[:, :, trim_len:, :]
 
             # Flatten for sidecar
-            km_flat = km_windows.reshape(-1, self.config.window_size, D)
-            vm_flat = vm_windows.reshape(-1, self.config.window_size, D)
+            km_flat = km_windows.reshape(-1, window_size, D)
+            vm_flat = vm_windows.reshape(-1, window_size, D)
             kv_concat = torch.cat([km_flat, vm_flat], dim=-1)
 
             # Compress (with gradients)
@@ -337,7 +372,9 @@ class LSTTrainer:
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "config": {
                     "d_head": self.d_head,
-                    "window_size": self.config.window_size,
+                    "min_window_size": self.config.min_window_size,
+                    "max_window_size": self.config.max_window_size,
+                    "max_capacity_prompt": self.config.max_capacity_prompt,
                     "hidden_dim": self.sidecar.hidden_dim,
                     "num_encoder_layers": len(self.sidecar.encoder.layers),
                 },

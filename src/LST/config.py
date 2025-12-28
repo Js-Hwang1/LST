@@ -35,11 +35,20 @@ class LSTConfig:
     The sidecar maps a window of N KV pairs to a single super-token
     that preserves language modeling quality.
 
+    Uses fixed-budget compression (KVCache-Factory compatible):
+    - max_capacity_prompt controls output cache size
+    - window_size is computed dynamically based on input sequence length
+
+    Training uses variable window sizes (min to max) so the sidecar learns
+    to handle different compression ratios at inference time.
+
     Attributes:
         d_head: Dimension of each attention head in the base model.
         n_heads: Number of attention heads in the base model.
-        window_size: Number of tokens (N) in each compression window.
-        num_windows: Number of windows per sample (for positional embeddings).
+        max_window_size: Maximum window size for training/inference.
+        min_window_size: Minimum window size (for efficiency).
+        num_sink: Number of sink tokens to preserve.
+        num_recent: Number of recent tokens to preserve.
         encoder_type: Type of encoder architecture.
         encoder_hidden_dim: Hidden dimension of the encoder.
         encoder_num_layers: Number of encoder layers.
@@ -57,9 +66,13 @@ class LSTConfig:
     d_head: int = 128
     n_heads: int = 32
 
-    # Compression window
-    window_size: int = 8
-    num_windows: int = 4  # For window positional embeddings
+    # Compression parameters (variable window for training)
+    max_window_size: int = 32  # Max window size
+    min_window_size: int = 4   # Min window size
+
+    # Fixed-budget mode (KVCache-Factory compatible)
+    num_sink: int = 4
+    num_recent: int = 8
 
     # Encoder configuration
     encoder_type: EncoderType = EncoderType.TRANSFORMER
@@ -87,7 +100,8 @@ class LSTConfig:
         """Validate configuration after initialization."""
         assert self.d_head > 0, "d_head must be positive"
         assert self.n_heads > 0, "n_heads must be positive"
-        assert self.window_size >= 2, "window_size must be at least 2"
+        assert self.min_window_size >= 2, "min_window_size must be at least 2"
+        assert self.max_window_size >= self.min_window_size, "max_window_size >= min_window_size"
         assert self.encoder_num_layers >= 1, "encoder_num_layers must be at least 1"
 
         # Convert string enums if needed
@@ -95,6 +109,34 @@ class LSTConfig:
             self.encoder_type = EncoderType(self.encoder_type)
         if isinstance(self.aggregator_type, str):
             self.aggregator_type = AggregatorType(self.aggregator_type)
+
+    def compute_window_size(self, seq_len: int, max_capacity_prompt: int) -> int:
+        """
+        Compute dynamic window size for fixed-budget compression.
+
+        Window size is computed to achieve the target output cache size.
+
+        Args:
+            seq_len: Input sequence length
+            max_capacity_prompt: Target output cache size
+
+        Returns:
+            Window size to use for compression
+        """
+        # Output = num_sink + num_compressed + num_recent = max_capacity_prompt
+        # num_compressed = max_capacity_prompt - num_sink - num_recent
+        target_compressed = max_capacity_prompt - self.num_sink - self.num_recent
+        if target_compressed <= 0:
+            return self.max_window_size
+
+        # Middle tokens = seq_len - num_sink - num_recent
+        middle_tokens = seq_len - self.num_sink - self.num_recent
+        if middle_tokens <= 0:
+            return self.min_window_size
+
+        # window_size = ceil(middle_tokens / target_compressed)
+        window_size = (middle_tokens + target_compressed - 1) // target_compressed
+        return max(self.min_window_size, min(window_size, self.max_window_size))
 
     @property
     def input_dim(self) -> int:
@@ -110,7 +152,6 @@ class LSTConfig:
     def from_model(
         cls,
         model_name_or_config,
-        window_size: int = 8,
         **kwargs,
     ) -> "LSTConfig":
         """
@@ -118,8 +159,7 @@ class LSTConfig:
 
         Args:
             model_name_or_config: HuggingFace model name or config object.
-            window_size: Compression window size.
-            **kwargs: Additional config overrides.
+            **kwargs: Additional config overrides (e.g., min_window_size, max_window_size).
 
         Returns:
             LSTConfig configured for the target model.
@@ -144,14 +184,17 @@ class LSTConfig:
         return cls(
             d_head=d_head,
             n_heads=n_heads,
-            window_size=window_size,
             **kwargs,
         )
 
 
 @dataclass
 class TrainingConfig:
-    """Configuration for LST training."""
+    """Configuration for LST training.
+
+    Training uses variable window sizes (min to max) so the sidecar learns
+    to handle different compression ratios at inference time.
+    """
 
     # Optimization
     learning_rate: float = 1e-3
@@ -166,10 +209,11 @@ class TrainingConfig:
     # Regularization
     gradient_clip_norm: float = 1.0
 
-    # Compression parameters
+    # Compression parameters (variable window training)
     num_sink: int = 4
     num_recent: int = 8
-    window_size: int = 8
+    min_window_size: int = 4
+    max_window_size: int = 32
     num_windows_per_sample: int = 4
 
     # Checkpointing
@@ -195,3 +239,5 @@ class TrainingConfig:
         assert self.learning_rate > 0, "learning_rate must be positive"
         assert self.batch_size > 0, "batch_size must be positive"
         assert self.max_steps > 0, "max_steps must be positive"
+        assert self.min_window_size >= 2, "min_window_size must be at least 2"
+        assert self.max_window_size >= self.min_window_size, "max >= min window size"

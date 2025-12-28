@@ -4,12 +4,18 @@ Training Datasets for LST
 
 Efficient text datasets for training LST sidecars.
 
-Supports two modes:
-1. On-the-fly tokenization (slow, ~5 minutes)
-2. Pre-cached tokenization (fast, <1 second)
+Key insight: Training sequences MUST be longer than max_capacity_prompt
+for compression to occur.
 
-To create cached data, run:
-    python scripts/collection/collect_data.py --output data/wikitext_512.pt
+Recommended datasets for long-context training:
+- booksum: Book chapters, avg ~6700 tokens (best for 2K+ budgets)
+- slimpajama: Mixed web data, up to ~5K tokens
+- wikitext: Short paragraphs, uses concatenation mode
+
+Supports:
+1. Naturally long datasets (booksum) - filters for docs >= max_length
+2. Concatenation mode for short datasets (wikitext)
+3. Pre-cached tokenization for fast loading
 """
 
 import logging
@@ -22,33 +28,56 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
+# Dataset configurations for long-context training
+DATASET_CONFIGS = {
+    "booksum": {
+        "name": "kmfoda/booksum",
+        "config": None,
+        "text_field": "chapter",
+        "avg_tokens": 6700,
+        "val_split": "validation",
+    },
+    "slimpajama": {
+        "name": "cerebras/SlimPajama-627B",
+        "config": None,
+        "text_field": "text",
+        "avg_tokens": 650,
+        "val_split": "validation",
+    },
+    "wikitext": {
+        "name": "wikitext",
+        "config": "wikitext-103-v1",
+        "text_field": "text",
+        "avg_tokens": 100,
+        "val_split": "validation",
+    },
+}
 
-class TextDataset(Dataset):
+
+class LongTextDataset(Dataset):
     """
-    Pre-tokenized text dataset for efficient training.
+    Dataset for long-context training.
 
-    Loads and tokenizes text samples, filtering for appropriate length.
+    For naturally long datasets (booksum), filters for documents >= max_length.
+    For short datasets (wikitext), concatenates documents to reach max_length.
 
     Args:
         tokenizer: HuggingFace tokenizer
-        max_length: Maximum sequence length
-        num_samples: Number of samples to load
-        split: Dataset split ('train', 'validation', 'test')
-        dataset_name: HuggingFace dataset name
-        dataset_config: Dataset configuration
+        max_length: Target sequence length (should be > max_capacity_prompt)
+        num_samples: Number of samples to create
+        split: Dataset split ('train', 'validation')
+        dataset_name: Dataset key ('booksum', 'slimpajama', 'wikitext') or HF path
         seed: Random seed for shuffling
     """
 
     def __init__(
         self,
         tokenizer,
-        max_length: int = 512,
-        num_samples: int = 10000,
+        max_length: int = 4096,
+        num_samples: int = 5000,
         split: str = "train",
-        dataset_name: str = "wikitext",
-        dataset_config: str = "wikitext-103-v1",
+        dataset_name: str = "booksum",
         seed: int = 42,
-        min_length: int = 100,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -56,46 +85,109 @@ class TextDataset(Dataset):
 
         from datasets import load_dataset
 
-        dataset = load_dataset(dataset_name, dataset_config, split=split)
+        # Resolve dataset config
+        if dataset_name in DATASET_CONFIGS:
+            cfg = DATASET_CONFIGS[dataset_name]
+            hf_name = cfg["name"]
+            hf_config = cfg["config"]
+            text_field = cfg["text_field"]
+            avg_tokens = cfg["avg_tokens"]
+            # Use correct split name for validation
+            if split == "validation":
+                split = cfg.get("val_split", "validation")
+        else:
+            # Assume it's a direct HuggingFace path
+            hf_name = dataset_name
+            hf_config = None
+            text_field = "text"
+            avg_tokens = 500  # Unknown, assume moderate
+
+        logger.info(f"Loading dataset: {hf_name} (split={split})")
+
+        if hf_config:
+            dataset = load_dataset(hf_name, hf_config, split=split)
+        else:
+            dataset = load_dataset(hf_name, split=split)
         dataset = dataset.shuffle(seed=seed)
 
-        # Pre-tokenize samples
+        # Decide strategy based on expected document length
+        if avg_tokens >= max_length * 0.5:
+            # Naturally long - filter for documents >= max_length
+            self._load_long_documents(dataset, text_field, tokenizer, max_length, num_samples)
+        else:
+            # Short documents - concatenate
+            self._load_concatenated(dataset, text_field, tokenizer, max_length, num_samples)
+
+    def _load_long_documents(self, dataset, text_field, tokenizer, max_length, num_samples):
+        """Load naturally long documents, truncating to max_length."""
+        logger.info(f"Filtering for documents with >= {max_length} tokens...")
+
         self.samples = []
-        for item in tqdm(
-            dataset,
-            desc=f"Tokenizing {split}",
-            total=min(num_samples * 2, len(dataset)),
-        ):
-            text = item.get("text", "")
-            if len(text.strip()) < min_length:
+        skipped = 0
+
+        for doc in tqdm(dataset, desc="Filtering", total=min(num_samples * 3, len(dataset))):
+            text = doc.get(text_field, "")
+            if not text or not text.strip():
                 continue
 
-            # First tokenize without padding to check actual length
             tokens = tokenizer(
                 text,
+                return_tensors="pt",
                 truncation=True,
                 max_length=max_length,
-                return_tensors="pt",
-            )
+                add_special_tokens=False,
+            )["input_ids"].squeeze(0)
 
-            actual_length = tokens["input_ids"].shape[1]
-
-            # Only keep samples that are close to max_length (within 10 tokens)
-            if actual_length >= max_length - 10:
-                # Pad to exact max_length for consistent batch sizes
-                if actual_length < max_length:
-                    pad_length = max_length - actual_length
-                    pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id or 0
-                    padding = torch.full(
-                        (1, pad_length), pad_token_id, dtype=tokens["input_ids"].dtype
-                    )
-                    tokens["input_ids"] = torch.cat([tokens["input_ids"], padding], dim=1)
-                self.samples.append(tokens["input_ids"].squeeze(0))
+            if len(tokens) >= max_length:
+                self.samples.append(tokens[:max_length])
+            else:
+                skipped += 1
 
             if len(self.samples) >= num_samples:
                 break
 
-        logger.info(f"Loaded {len(self.samples)} samples for {split}")
+        if len(self.samples) < num_samples:
+            logger.warning(
+                f"Only found {len(self.samples)} documents >= {max_length} tokens. "
+                f"Consider using a shorter max_length or different dataset."
+            )
+
+        logger.info(f"Created {len(self.samples)} samples (skipped {skipped} short docs)")
+
+    def _load_concatenated(self, dataset, text_field, tokenizer, max_length, num_samples):
+        """Concatenate short documents to create long sequences."""
+        logger.info(f"Concatenating documents to length {max_length}...")
+
+        all_text = " ".join(
+            doc[text_field].strip()
+            for doc in dataset
+            if doc.get(text_field) and doc[text_field].strip()
+        )
+
+        logger.info(f"Tokenizing concatenated text (~{len(all_text)//1000}K chars)...")
+        all_tokens = tokenizer(
+            all_text,
+            return_tensors="pt",
+            truncation=False,
+            add_special_tokens=False,
+        )["input_ids"].squeeze(0)
+
+        total_tokens = len(all_tokens)
+        logger.info(f"Total tokens: {total_tokens:,}")
+
+        self.samples = []
+        for start in range(0, total_tokens - max_length, max_length):
+            if len(self.samples) >= num_samples:
+                break
+            self.samples.append(all_tokens[start : start + max_length])
+
+        if len(self.samples) < num_samples:
+            logger.warning(
+                f"Only created {len(self.samples)} samples (requested {num_samples}). "
+                f"Consider using a larger dataset."
+            )
+
+        logger.info(f"Created {len(self.samples)} samples")
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -108,7 +200,7 @@ class CachedTextDataset(Dataset):
     """
     Dataset that loads pre-tokenized samples from a cached .pt file.
 
-    Much faster than TextDataset (~1 second vs ~5 minutes).
+    Much faster than on-the-fly tokenization.
 
     Args:
         cached_path: Path to cached .pt file
@@ -147,51 +239,53 @@ def collate_fn(batch):
 def create_dataloaders(
     tokenizer=None,
     batch_size: int = 4,
-    max_length: int = 512,
+    max_length: int = 4096,
     train_samples: int = 5000,
     val_samples: int = 100,
     seed: int = 42,
     num_workers: int = 0,
     cached_path: str | Path | None = None,
+    dataset_name: str = "booksum",
 ) -> tuple[DataLoader, DataLoader]:
     """
-    Create training and validation dataloaders.
+    Create training and validation dataloaders with long sequences.
 
     Args:
         tokenizer: HuggingFace tokenizer (not needed if using cached_path)
         batch_size: Batch size
-        max_length: Maximum sequence length
+        max_length: Sequence length (MUST be > max_capacity_prompt for compression)
         train_samples: Number of training samples
         val_samples: Number of validation samples
         seed: Random seed
         num_workers: Number of dataloader workers
         cached_path: Path to pre-tokenized .pt file (fast mode)
+        dataset_name: Dataset key ('booksum', 'slimpajama', 'wikitext') or HF path
 
     Returns:
         Tuple of (train_loader, val_loader)
     """
     if cached_path is not None:
-        # Fast mode: load from pre-cached file
         train_dataset = CachedTextDataset(cached_path, split="train")
         val_dataset = CachedTextDataset(cached_path, split="val")
     else:
-        # Slow mode: tokenize on-the-fly
         if tokenizer is None:
             raise ValueError("tokenizer is required when cached_path is not provided")
 
-        train_dataset = TextDataset(
+        train_dataset = LongTextDataset(
             tokenizer,
             max_length=max_length,
             num_samples=train_samples,
             split="train",
+            dataset_name=dataset_name,
             seed=seed,
         )
 
-        val_dataset = TextDataset(
+        val_dataset = LongTextDataset(
             tokenizer,
             max_length=max_length,
             num_samples=val_samples,
             split="validation",
+            dataset_name=dataset_name,
             seed=seed + 1,
         )
 

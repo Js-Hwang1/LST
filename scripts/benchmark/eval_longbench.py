@@ -488,11 +488,46 @@ def load_longbench_task(task_name: str, num_samples: int | None = None) -> list[
 def compress_cache_lst(
     cache: list[tuple[torch.Tensor, torch.Tensor]],
     sidecar: SidecarPPL,
-    window_size: int,
-    num_sink: int,
-    num_recent: int,
+    max_capacity_prompt: int,
+    num_sink: int = 4,
+    num_recent: int = 8,
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:
-    """Compress cache using LST sidecar."""
+    """
+    Compress cache using LST sidecar (fixed-budget mode).
+
+    Window size is computed dynamically to achieve target output cache size.
+
+    Args:
+        cache: List of (K, V) tuples per layer
+        sidecar: Trained LST sidecar
+        max_capacity_prompt: Target output cache size
+        num_sink: Number of sink tokens to preserve
+        num_recent: Number of recent tokens to preserve
+    """
+    if len(cache) == 0:
+        return cache
+
+    # Get sequence length from first layer
+    S = cache[0][0].shape[2]
+
+    # If already within budget, no compression needed
+    if S <= max_capacity_prompt:
+        return cache
+
+    # Compute window_size to achieve target output size
+    target_compressed = max_capacity_prompt - num_sink - num_recent
+    middle_tokens = S - num_sink - num_recent
+
+    if target_compressed <= 0 or middle_tokens <= 0:
+        return cache  # Cannot compress further
+
+    # window_size = ceil(middle_tokens / target_compressed)
+    window_size = (middle_tokens + target_compressed - 1) // target_compressed
+    # Clamp to sidecar's supported range
+    max_ws = getattr(sidecar, 'max_window_size', 32)
+    min_ws = getattr(sidecar, 'min_window_size', 2)
+    window_size = max(min_ws, min(window_size, max_ws))
+
     compressed = []
 
     for k, v in cache:
@@ -1258,7 +1293,9 @@ def evaluate_sample(
 
             # Compress cache based on method
             if method == "lst":
-                compressed = compress_cache_lst(cache, sidecar, window_size, num_sink, num_recent)
+                compressed = compress_cache_lst(
+                    cache, sidecar, max_capacity_prompt, num_sink, num_recent,
+                )
             elif method == "mean":
                 compressed = compress_cache_mean(cache, window_size, num_sink, num_recent)
             else:
