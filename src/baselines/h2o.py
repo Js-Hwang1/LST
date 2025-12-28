@@ -60,8 +60,16 @@ class H2O(CompressionMethod):
             if query_states.dim() == 3:
                 query_states = query_states.unsqueeze(1)
 
+            # Handle GQA: expand KV heads to match query heads if needed
+            num_q_heads = query_states.shape[1]
+            if num_q_heads != num_heads:
+                num_kv_groups = num_q_heads // num_heads
+                keys_expanded = keys.repeat_interleave(num_kv_groups, dim=1)
+            else:
+                keys_expanded = keys
+
             # Attention from ALL queries to ALL keys
-            attn_weights = torch.matmul(query_states, keys.transpose(2, 3)) / math.sqrt(head_dim)
+            attn_weights = torch.matmul(query_states, keys_expanded.transpose(2, 3)) / math.sqrt(head_dim)
 
             # Full causal mask (KVCache-Factory applies to entire matrix)
             mask = torch.full((seq_len, seq_len), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
@@ -72,7 +80,12 @@ class H2O(CompressionMethod):
             attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(keys.dtype)
 
             # Sum across ALL queries, exclude recent window from selection
-            attn_cache = attn_weights[:, :, :, :-window_size].sum(dim=-2)
+            # For GQA, average across query head groups to get per-KV-head scores
+            attn_sum = attn_weights[:, :, :, :-window_size].sum(dim=-2)
+            if num_q_heads != num_heads:
+                attn_cache = attn_sum.view(bsz, num_heads, num_kv_groups, -1).mean(dim=2)
+            else:
+                attn_cache = attn_sum
 
         elif attention_scores is not None:
             if attention_scores.dim() == 4:

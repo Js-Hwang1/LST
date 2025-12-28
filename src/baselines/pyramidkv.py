@@ -96,9 +96,18 @@ class PyramidKV(CompressionMethod):
             if query_states.dim() == 3:
                 query_states = query_states.unsqueeze(1)
 
+            # Handle GQA: expand KV heads to match query heads if needed
+            num_q_heads = query_states.shape[1]
+            if num_q_heads != num_heads:
+                num_kv_groups = num_q_heads // num_heads
+                keys_expanded = keys.repeat_interleave(num_kv_groups, dim=1)
+            else:
+                keys_expanded = keys
+                num_kv_groups = 1
+
             # Attention from observation window
             attn_weights = torch.matmul(
-                query_states[..., -window_size:, :], keys.transpose(2, 3)
+                query_states[..., -window_size:, :], keys_expanded.transpose(2, 3)
             ) / math.sqrt(head_dim)
 
             # Causal mask
@@ -108,13 +117,17 @@ class PyramidKV(CompressionMethod):
             attn_weights[:, :, :, -window_size:] += mask[None, None, :, :]
 
             attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(keys.dtype)
-            attn_weights_sum = attn_weights[:, :, :, :-window_size].sum(dim=-2)
+            attn_sum = attn_weights[:, :, :, :-window_size].sum(dim=-2)
+
+            # For GQA, average across query head groups
+            if num_q_heads != num_heads:
+                attn_sum = attn_sum.view(bsz, num_heads, num_kv_groups, -1).mean(dim=2)
 
             # Apply pooling
             if config.pooling == "avgpool":
-                attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size=config.kernel_size, padding=config.kernel_size // 2, stride=1)
+                attn_cache = F.avg_pool1d(attn_sum, kernel_size=config.kernel_size, padding=config.kernel_size // 2, stride=1)
             else:
-                attn_cache = F.max_pool1d(attn_weights_sum, kernel_size=config.kernel_size, padding=config.kernel_size // 2, stride=1)
+                attn_cache = F.max_pool1d(attn_sum, kernel_size=config.kernel_size, padding=config.kernel_size // 2, stride=1)
 
         elif attention_scores is not None:
             if attention_scores.dim() == 4:
