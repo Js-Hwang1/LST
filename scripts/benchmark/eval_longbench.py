@@ -140,13 +140,14 @@ TREC_CLASSES = [
     "Organ of body",
 ]
 
-# Official LongBench prompt templates (from THUDM/LongBench)
+# Prompt templates - EXACT match of KVCache-Factory's run_longbench.py
+# Reference: https://github.com/Zefan-Cai/KVCache-Factory/blob/main/run_longbench.py
 DATASET_PROMPTS = {
     "narrativeqa": (
         "You are given a story, which can be either a novel or a movie script, "
-        "and a question. Answer the question as concisely as you can, using a "
+        "and a question. Answer the question asconcisely as you can, using a "
         "single phrase if possible. Do not provide any explanation.\n\n"
-        "Story: {context}\n\nNow, answer the question based on the story as "
+        "Story: {context}\n\nNow, answer the question based on the story as"
         "concisely as you can, using a single phrase if possible. Do not provide "
         "any explanation.\n\nQuestion: {input}\n\nAnswer:"
     ),
@@ -156,7 +157,7 @@ DATASET_PROMPTS = {
         "If the question cannot be answered based on the information in the article, "
         "write \"unanswerable\". If the question is a yes/no question, answer "
         "\"yes\", \"no\", or \"unanswerable\". Do not provide any explanation.\n\n"
-        "Article: {context}\n\nAnswer the question based on the above article as "
+        "Article: {context}\n\n Answer the question based on the above article as "
         "concisely as you can, using a single phrase or sentence if possible. "
         "If the question cannot be answered based on the information in the article, "
         "write \"unanswerable\". If the question is a yes/no question, answer "
@@ -208,9 +209,8 @@ DATASET_PROMPTS = {
         "Query: {input}\nAnswer:"
     ),
     "multi_news": (
-        "You are given several news passages. Write a one-page summary of all "
-        "news.\n\n"
-        "{context}\n\n"
+        "You are given several news passages. Write a one-page summary of all news. \n\n"
+        "News:\n{context}\n\n"
         "Now, write a one-page summary of all the news.\n\nSummary:"
     ),
     "trec": (
@@ -233,7 +233,8 @@ DATASET_PROMPTS = {
         "how many non-repeating paragraphs are there in total?\n\n"
         "{context}\n\n"
         "Please enter the final count of unique paragraphs after removing duplicates. "
-        "The answer is a positive integer.\n\nAnswer:"
+        "The output format should only contain the number, such as 1, 2, 3, and so on.\n\n"
+        "The final answer is: "
     ),
     "passage_retrieval_en": (
         "Here are 30 paragraphs from Wikipedia, along with an abstract. Please "
@@ -241,13 +242,14 @@ DATASET_PROMPTS = {
         "{context}\n\n"
         "The following is an abstract.\n\n{input}\n\n"
         "Please enter the number of the paragraph that the abstract is from. "
-        "The answer format must be like \"Paragraph 1\", \"Paragraph 2\", etc.\n\nAnswer:"
+        "The answer format must be like \"Paragraph 1\", \"Paragraph 2\", etc.\n\n"
+        "The answer is: "
     ),
     "lcc": (
-        "Please complete the code given below.\n\n{context}{input}"
+        "Please complete the code given below. \n{context}Next line of code:\n"
     ),
     "repobench-p": (
-        "Please complete the code given below.\n\n{context}{input}"
+        "Please complete the code given below. \n{context}{input}Next line of code:\n"
     ),
 }
 
@@ -870,101 +872,92 @@ def _compute_accuracy_fallback(prediction: str, ground_truths: list[str]) -> flo
     return 0.0
 
 
-def compute_count_score(prediction: str, ground_truths: list[str]) -> float:
+def count_score(prediction: str, ground_truth: str) -> float:
     """
-    Compute count score for passage_count task (official LongBench standard).
+    Count score - exact match of KVCache-Factory's metrics.py.
 
-    Extracts all numbers from prediction and computes precision:
-    how many of the extracted numbers match the ground truth.
+    Reference: https://github.com/Zefan-Cai/KVCache-Factory/blob/main/metrics.py
     """
     import re
 
-    # Extract all numbers from prediction
     numbers = re.findall(r"\d+", prediction)
-
-    if not numbers:
-        return 0.0
-
-    # Count how many match the ground truth
     right_num = 0
-    for gt in ground_truths:
-        gt_str = str(gt).strip()
-        for number in numbers:
-            if str(number) == gt_str:
-                right_num += 1
+    for number in numbers:
+        if str(number) == str(ground_truth):
+            right_num += 1
+    final_score = 0.0 if len(numbers) == 0 else right_num / len(numbers)
+    return float(final_score)
 
-    # Precision: correct / total extracted
-    return right_num / len(numbers)
+
+def compute_count_score(prediction: str, ground_truths: list[str]) -> float:
+    """Wrapper that iterates through ground_truths and takes max (matches eval.py)."""
+    max_score = 0.0
+    for ground_truth in ground_truths:
+        score = count_score(prediction, ground_truth)
+        max_score = max(max_score, score)
+    return max_score
+
+
+def retrieval_score(prediction: str, ground_truth: str) -> float:
+    """
+    Retrieval score - exact match of KVCache-Factory's metrics.py.
+
+    Reference: https://github.com/Zefan-Cai/KVCache-Factory/blob/main/metrics.py
+    """
+    import re
+
+    pattern = r'Paragraph (\d+)'
+    matches = re.findall(pattern, ground_truth)
+    if not matches:
+        return 0.0
+    ground_truth_id = matches[0]
+
+    numbers = re.findall(r"\d+", prediction)
+    right_num = 0
+    for number in numbers:
+        if str(number) == str(ground_truth_id):
+            right_num += 1
+    final_score = 0.0 if len(numbers) == 0 else right_num / len(numbers)
+    return float(final_score)
 
 
 def compute_retrieval_score(prediction: str, ground_truths: list[str]) -> float:
+    """Wrapper that iterates through ground_truths and takes max (matches eval.py)."""
+    max_score = 0.0
+    for ground_truth in ground_truths:
+        score = retrieval_score(prediction, ground_truth)
+        max_score = max(max_score, score)
+    return max_score
+
+
+def code_sim_score(prediction: str, ground_truth: str) -> float:
     """
-    Compute retrieval score for passage_retrieval task (official LongBench standard).
+    Code similarity score - exact match of KVCache-Factory's metrics.py.
 
-    Extracts paragraph ID from ground truth and checks if prediction contains it.
-    Uses precision scoring if multiple numbers are predicted.
-    """
-    import re
-
-    # Extract paragraph ID from ground truth (format: "Paragraph X")
-    ground_truth_id = None
-    for gt in ground_truths:
-        pattern = r'Paragraph (\d+)'
-        matches = re.findall(pattern, gt)
-        if matches:
-            ground_truth_id = matches[0]
-            break
-
-    if ground_truth_id is None:
-        # Fallback: use first ground truth as-is
-        ground_truth_id = str(ground_truths[0]).strip() if ground_truths else ""
-
-    # Extract all numbers from prediction
-    numbers = re.findall(r"\d+", prediction)
-
-    if not numbers:
-        return 0.0
-
-    # Count how many match the ground truth ID
-    right_num = sum(1 for n in numbers if str(n) == ground_truth_id)
-
-    # Precision: correct / total extracted
-    return right_num / len(numbers)
-
-
-def compute_code_similarity(prediction: str, ground_truths: list[str]) -> float:
-    """
-    Compute code similarity using fuzzywuzzy (official LongBench standard).
-
-    Preprocessing: Extract first non-comment, non-markdown line from prediction.
+    Reference: https://github.com/Zefan-Cai/KVCache-Factory/blob/main/metrics.py
     """
     try:
         from fuzzywuzzy import fuzz
     except ImportError:
-        logger.warning("fuzzywuzzy not installed, using fallback edit similarity")
-        return _compute_edit_similarity_fallback(prediction, ground_truths)
+        return 0.0
 
-    # Official preprocessing: extract first meaningful code line
     all_lines = prediction.lstrip('\n').split('\n')
     processed_prediction = ""
     for line in all_lines:
-        # Skip markdown code blocks, comments
         if ('`' not in line) and ('#' not in line) and ('//' not in line):
             processed_prediction = line
             break
 
-    if not processed_prediction:
-        processed_prediction = prediction.lstrip('\n').split('\n')[0] if prediction.strip() else ""
+    return fuzz.ratio(processed_prediction, ground_truth) / 100
 
-    best_sim = 0.0
-    for gt in ground_truths:
-        if not gt:
-            continue
-        # fuzz.ratio returns 0-100, normalize to 0-1
-        sim = fuzz.ratio(processed_prediction, gt) / 100.0
-        best_sim = max(best_sim, sim)
 
-    return best_sim
+def compute_code_similarity(prediction: str, ground_truths: list[str]) -> float:
+    """Wrapper that iterates through ground_truths and takes max (matches eval.py)."""
+    max_score = 0.0
+    for ground_truth in ground_truths:
+        score = code_sim_score(prediction, ground_truth)
+        max_score = max(max_score, score)
+    return max_score
 
 
 def _compute_edit_similarity_fallback(prediction: str, ground_truths: list[str]) -> float:
@@ -1079,7 +1072,7 @@ def evaluate_sample(
         logger.info(f"Prompt (last 200 chars): ...{prompt[-200:]}")
 
     # For dense (no compression), use model.generate() directly
-    # This matches KVCache-Factory's approach and is more reliable
+    # Parameters match KVCache-Factory's run_longbench.py exactly
     if method == "dense":
         with torch.no_grad():
             output_ids = model.generate(
@@ -1089,8 +1082,8 @@ def evaluate_sample(
                 num_beams=1,
                 do_sample=False,
                 temperature=1.0,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
+                min_length=prompt_len + 1,  # KVCache-Factory: ensures at least 1 token generated
+                eos_token_id=[tokenizer.eos_token_id],  # KVCache-Factory uses list
             )
         # Decode only the generated part
         response = tokenizer.decode(
