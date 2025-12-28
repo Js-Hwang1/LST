@@ -90,6 +90,9 @@ from src.baselines import (
 )
 from src.LST.sidecar import SidecarPPL
 
+# Methods that require query states for accurate compression
+ATTENTION_BASED_METHODS = {"h2o", "snapkv", "pyramidkv"}
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -593,7 +596,10 @@ def compress_cache_with_baseline(
     max_capacity_prompt: int = 2048,
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:
     """
-    Generic cache compression using baseline methods.
+    Generic cache compression using baseline methods (legacy interface).
+
+    Note: H2O, SnapKV, PyramidKV, StreamingLLM now use compress_cache() with
+    KVCache-Factory compatible parameters. This function is for other methods.
 
     Args:
         cache: List of (key, value) tuples per layer
@@ -601,22 +607,10 @@ def compress_cache_with_baseline(
         num_sink: Number of sink tokens to preserve
         num_recent: Number of recent tokens to preserve
         compression_ratio: Compression ratio for ratio-based methods
-        max_capacity_prompt: Max KV cache capacity for PyramidKV (official default: 2048)
-
-    Notes:
-        - PyramidKV uses max_capacity_prompt (official parameter) not compression_ratio
-        - Other methods use compression_ratio for fair comparison with LST
+        max_capacity_prompt: Max KV cache capacity (unused for legacy methods)
     """
-    num_layers = len(cache)
-
     # Create method instance based on method name
-    if method_name == "h2o":
-        config = H2OConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
-        method = H2O(config)
-    elif method_name == "streaming":
-        config = StreamingLLMConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
-        method = StreamingLLM(config)
-    elif method_name == "tova":
+    if method_name == "tova":
         config = TOVAConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
         method = TOVA(config)
     elif method_name == "kvmerger":
@@ -628,22 +622,8 @@ def compress_cache_with_baseline(
     elif method_name == "cam":
         config = CaMConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
         method = CaM(config)
-    elif method_name == "snapkv":
-        config = SnapKVConfig(num_sink=num_sink, num_recent=num_recent, compression_ratio=compression_ratio)
-        method = SnapKV(config)
-    elif method_name == "pyramidkv":
-        # PyramidKV uses official parameters from the paper
-        config = PyramidKVConfig(
-            num_sink=num_sink,
-            num_recent=num_recent,
-            num_layers=num_layers,
-            max_capacity_prompt=max_capacity_prompt,
-            window_size=32,  # Official default
-            beta=20,  # Official default
-        )
-        method = PyramidKV(config)
     else:
-        raise ValueError(f"Unknown method: {method_name}")
+        raise ValueError(f"Unknown method: {method_name}. Use compress_cache() for H2O/SnapKV/PyramidKV/StreamingLLM.")
 
     compressed = []
 
@@ -653,7 +633,6 @@ def compress_cache_with_baseline(
         k_flat = k.transpose(1, 2).reshape(B, S, H * D)
         v_flat = v.transpose(1, 2).reshape(B, S, H * D)
 
-        # Pass layer_idx for layer-aware methods like PyramidKV
         k_comp, v_comp = method.compress(k_flat, v_flat, layer_idx=layer_idx)
 
         S_new = k_comp.shape[1]
@@ -663,6 +642,166 @@ def compress_cache_with_baseline(
         compressed.append((k_comp, v_comp))
 
     return compressed
+
+
+def compress_cache(
+    cache: list[tuple[torch.Tensor, torch.Tensor]],
+    queries: list[torch.Tensor],
+    method_name: str,
+    max_capacity_prompt: int = 512,
+    window_size: int = 8,
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """
+    Compress KV cache using baseline methods.
+
+    Uses absolute token counts (max_capacity_prompt) matching KVCache-Factory.
+
+    Args:
+        cache: List of (key, value) tuples per layer, shape (B, H, S, D)
+        queries: List of query tensors per layer, shape (B, H, S, D)
+        method_name: Compression method name
+        max_capacity_prompt: Total KV cache size to keep (e.g., 64, 128, 256, 512, 1024, 2048)
+        window_size: Observation window for attention (default: 8)
+
+    Returns:
+        List of compressed (key, value) tuples
+    """
+    num_layers = len(cache)
+    compressed = []
+    method_lower = method_name.lower()
+
+    for layer_idx, (k, v) in enumerate(cache):
+        q = queries[layer_idx] if layer_idx < len(queries) else None
+
+        if method_lower == "h2o":
+            config = H2OConfig(
+                max_capacity_prompt=max_capacity_prompt,
+                window_size=window_size,
+            )
+            method = H2O(config)
+            k_comp, v_comp = method.compress(k, v, query_states=q)
+
+        elif method_lower == "snapkv":
+            config = SnapKVConfig(
+                max_capacity_prompt=max_capacity_prompt,
+                window_size=window_size,
+                kernel_size=7,
+                pooling="maxpool",
+            )
+            method = SnapKV(config)
+            k_comp, v_comp = method.compress(k, v, query_states=q)
+
+        elif method_lower == "pyramidkv":
+            config = PyramidKVConfig(
+                max_capacity_prompt=max_capacity_prompt,
+                window_size=window_size,
+                kernel_size=7,
+                pooling="maxpool",
+                beta=20,
+                num_hidden_layers=num_layers,
+            )
+            method = PyramidKV(config)
+            k_comp, v_comp = method.compress(k, v, query_states=q, layer_idx=layer_idx)
+
+        elif method_lower in ("streaming", "streamingllm"):
+            config = StreamingLLMConfig(
+                max_capacity_prompt=max_capacity_prompt,
+                window_size=None,  # Uses default: max_capacity_prompt - 4
+            )
+            method = StreamingLLM(config)
+            k_comp, v_comp = method.compress(k, v)
+
+        else:
+            raise ValueError(f"Unknown method: {method_name}")
+
+        compressed.append((k_comp, v_comp))
+
+    return compressed
+
+
+def run_prefill_with_query_capture(
+    model,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor = None,
+) -> tuple[list[tuple[torch.Tensor, torch.Tensor]], list[torch.Tensor]]:
+    """
+    Run model prefill and capture both KV cache and query states.
+
+    This is needed for KVCache-Factory compatible compression methods
+    which require access to query states for computing attention scores.
+
+    Args:
+        model: The language model
+        input_ids: Input token IDs (B, S)
+        attention_mask: Optional attention mask
+
+    Returns:
+        Tuple of (cache, queries) where:
+        - cache: List of (key, value) tuples per layer
+        - queries: List of query tensors per layer
+    """
+    device = input_ids.device
+    queries_per_layer = []
+
+    # Hook to capture query projections
+    handles = []
+
+    def make_hook(layer_idx):
+        def hook_fn(module, args, kwargs, output):
+            # Extract query states from the attention output
+            # For most HF models, we can recompute queries from hidden states
+            hidden_states = args[0] if args else kwargs.get('hidden_states')
+            if hidden_states is not None and hasattr(module, 'q_proj'):
+                # Compute query projection
+                bsz, seq_len, _ = hidden_states.shape
+                q = module.q_proj(hidden_states)
+                # Reshape to (B, H, S, D)
+                num_heads = module.num_heads
+                head_dim = module.head_dim
+                q = q.view(bsz, seq_len, num_heads, head_dim).transpose(1, 2)
+                queries_per_layer.append((layer_idx, q.detach()))
+        return hook_fn
+
+    # Register hooks on all attention layers
+    layer_idx = 0
+    for name, module in model.named_modules():
+        if hasattr(module, 'q_proj') and 'self_attn' in name:
+            handle = module.register_forward_hook(make_hook(layer_idx), with_kwargs=True)
+            handles.append(handle)
+            layer_idx += 1
+
+    # Run forward pass
+    with torch.no_grad():
+        if attention_mask is not None:
+            outputs = model(input_ids, attention_mask=attention_mask, use_cache=True)
+        else:
+            outputs = model(input_ids, use_cache=True)
+        past_kv = outputs.past_key_values
+
+    # Remove hooks
+    for handle in handles:
+        handle.remove()
+
+    # Convert cache to list of tuples
+    if hasattr(past_kv, "key_cache"):
+        cache = [
+            (past_kv.key_cache[i], past_kv.value_cache[i])
+            for i in range(len(past_kv.key_cache))
+        ]
+    else:
+        cache = list(past_kv)
+
+    # Sort queries by layer index and extract tensors
+    queries_per_layer.sort(key=lambda x: x[0])
+    queries = [q for _, q in queries_per_layer]
+
+    # If hook capture failed, fall back to using keys as proxy for queries
+    # (less accurate but still works for evaluation)
+    if len(queries) != len(cache):
+        logger.warning(f"Query capture failed ({len(queries)} vs {len(cache)} layers), using keys as proxy")
+        queries = [k.clone() for k, v in cache]
+
+    return cache, queries
 
 
 def preprocess_prediction(prediction: str, task_name: str) -> str:
@@ -960,47 +1099,6 @@ def compute_code_similarity(prediction: str, ground_truths: list[str]) -> float:
     return max_score
 
 
-def _compute_edit_similarity_fallback(prediction: str, ground_truths: list[str]) -> float:
-    """Fallback edit similarity if fuzzywuzzy unavailable."""
-
-    def edit_distance(s1: str, s2: str) -> int:
-        m, n = len(s1), len(s2)
-        dp = [[0] * (n + 1) for _ in range(m + 1)]
-        for i in range(m + 1):
-            dp[i][0] = i
-        for j in range(n + 1):
-            dp[0][j] = j
-        for i in range(1, m + 1):
-            for j in range(1, n + 1):
-                if s1[i - 1] == s2[j - 1]:
-                    dp[i][j] = dp[i - 1][j - 1]
-                else:
-                    dp[i][j] = 1 + min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1])
-        return dp[m][n]
-
-    # Apply same preprocessing as official
-    all_lines = prediction.lstrip('\n').split('\n')
-    processed_prediction = ""
-    for line in all_lines:
-        if ('`' not in line) and ('#' not in line) and ('//' not in line):
-            processed_prediction = line
-            break
-
-    if not processed_prediction:
-        processed_prediction = prediction.lstrip('\n').split('\n')[0] if prediction.strip() else ""
-
-    best_sim = 0.0
-    for gt in ground_truths:
-        max_len = max(len(processed_prediction), len(gt))
-        if max_len == 0:
-            continue
-        dist = edit_distance(processed_prediction, gt)
-        sim = 1 - dist / max_len
-        best_sim = max(best_sim, sim)
-
-    return best_sim
-
-
 def evaluate_sample(
     model,
     tokenizer,
@@ -1092,82 +1190,141 @@ def evaluate_sample(
         ).strip()
     else:
         # For compression methods, use cache-based generation
-        # Split: process most tokens to build cache, keep last few for generation
-        split_point = max(1, prompt_len - 20)
-        context_ids = input_ids[:, :split_point]
-        question_ids = input_ids[:, split_point:]
-
-        with torch.no_grad():
-            outputs = model(context_ids, use_cache=True)
-            past_kv = outputs.past_key_values
-
-            # Convert DynamicCache to list of tuples if needed
-            if hasattr(past_kv, "key_cache"):
-                cache = [
-                    (past_kv.key_cache[i], past_kv.value_cache[i])
-                    for i in range(len(past_kv.key_cache))
-                ]
-            else:
-                cache = list(past_kv)
-
-        # Compress cache based on method
-        if method == "lst":
-            compressed = compress_cache_lst(cache, sidecar, window_size, num_sink, num_recent)
-        elif method == "mean":
-            compressed = compress_cache_mean(cache, window_size, num_sink, num_recent)
-        else:
-            compressed = compress_cache_with_baseline(
-                cache, method, num_sink, num_recent,
-                compression_ratio=float(window_size),
-                max_capacity_prompt=max_capacity_prompt,
-            )
-
-        # Generate with compressed cache
         from transformers.cache_utils import DynamicCache
 
-        past_kv = DynamicCache()
-        for k, v in compressed:
-            past_kv.update(k, v, layer_idx=len(past_kv))
+        # Check if this method needs query states for accurate compression
+        needs_queries = method.lower() in ATTENTION_BASED_METHODS
 
-        cache_len = compressed[0][0].shape[2] if compressed else 0
-        all_tokens = question_ids.clone()
+        if needs_queries or method.lower() in ("streaming", "streamingllm"):
+            # Process FULL prompt, compress, then generate
+            # This matches KVCache-Factory's run_longbench.py
 
-        with torch.no_grad():
-            # Process remaining question tokens
-            q_len = question_ids.shape[1]
-            position_ids = torch.arange(
-                cache_len, cache_len + q_len, device=device, dtype=torch.long
-            ).unsqueeze(0)
+            # Run prefill with query capture for attention-based compression
+            cache, queries = run_prefill_with_query_capture(model, input_ids, attention_mask)
 
-            out = model(
-                question_ids,
-                past_key_values=past_kv,
-                position_ids=position_ids,
-                use_cache=True,
+            # window_size = 8 for attention-based methods (H2O, SnapKV, PyramidKV)
+            kv_window_size = 8
+
+            # Compress using the baseline methods
+            compressed = compress_cache(
+                cache, queries,
+                method_name=method.lower(),
+                max_capacity_prompt=max_capacity_prompt,
+                window_size=kv_window_size,
             )
-            past_kv = out.past_key_values
+
+            # Build compressed cache for generation
+            past_kv = DynamicCache()
+            for k, v in compressed:
+                past_kv.update(k, v, layer_idx=len(past_kv))
+
+            cache_len = compressed[0][0].shape[2] if compressed else 0
 
             # Generate new tokens
-            for _ in range(max_new_tokens):
-                pos = cache_len + all_tokens.shape[1]
-                position_ids = torch.tensor([[pos]], device=device, dtype=torch.long)
+            generated_tokens = []
+            with torch.no_grad():
+                for _ in range(max_new_tokens):
+                    pos = cache_len + len(generated_tokens)
+                    position_ids = torch.tensor([[pos]], device=device, dtype=torch.long)
+
+                    # Use last token for generation
+                    if len(generated_tokens) == 0:
+                        # First generation step - use last token of prompt
+                        gen_input = input_ids[:, -1:]
+                    else:
+                        gen_input = torch.tensor([[generated_tokens[-1]]], device=device)
+
+                    out = model(
+                        gen_input,
+                        past_key_values=past_kv,
+                        position_ids=position_ids,
+                        use_cache=True,
+                    )
+                    past_kv = out.past_key_values
+                    next_token = out.logits[:, -1, :].argmax(dim=-1).item()
+                    generated_tokens.append(next_token)
+
+                    if next_token == tokenizer.eos_token_id:
+                        break
+
+            response = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+
+        else:
+            # Original approach for LST, mean, and other non-KVFactory methods
+            # Split: process most tokens to build cache, keep last few for generation
+            split_point = max(1, prompt_len - 20)
+            context_ids = input_ids[:, :split_point]
+            question_ids = input_ids[:, split_point:]
+
+            with torch.no_grad():
+                outputs = model(context_ids, use_cache=True)
+                past_kv = outputs.past_key_values
+
+                # Convert DynamicCache to list of tuples if needed
+                if hasattr(past_kv, "key_cache"):
+                    cache = [
+                        (past_kv.key_cache[i], past_kv.value_cache[i])
+                        for i in range(len(past_kv.key_cache))
+                    ]
+                else:
+                    cache = list(past_kv)
+
+            # Compress cache based on method
+            if method == "lst":
+                compressed = compress_cache_lst(cache, sidecar, window_size, num_sink, num_recent)
+            elif method == "mean":
+                compressed = compress_cache_mean(cache, window_size, num_sink, num_recent)
+            else:
+                compressed = compress_cache_with_baseline(
+                    cache, method, num_sink, num_recent,
+                    compression_ratio=float(window_size),
+                    max_capacity_prompt=max_capacity_prompt,
+                )
+
+            # Generate with compressed cache
+            past_kv = DynamicCache()
+            for k, v in compressed:
+                past_kv.update(k, v, layer_idx=len(past_kv))
+
+            cache_len = compressed[0][0].shape[2] if compressed else 0
+            all_tokens = question_ids.clone()
+
+            with torch.no_grad():
+                # Process remaining question tokens
+                q_len = question_ids.shape[1]
+                position_ids = torch.arange(
+                    cache_len, cache_len + q_len, device=device, dtype=torch.long
+                ).unsqueeze(0)
+
                 out = model(
-                    all_tokens[:, -1:],
+                    question_ids,
                     past_key_values=past_kv,
                     position_ids=position_ids,
                     use_cache=True,
                 )
                 past_kv = out.past_key_values
-                next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-                all_tokens = torch.cat([all_tokens, next_token], dim=1)
 
-                if next_token.item() == tokenizer.eos_token_id:
-                    break
+                # Generate new tokens
+                for _ in range(max_new_tokens):
+                    pos = cache_len + all_tokens.shape[1]
+                    position_ids = torch.tensor([[pos]], device=device, dtype=torch.long)
+                    out = model(
+                        all_tokens[:, -1:],
+                        past_key_values=past_kv,
+                        position_ids=position_ids,
+                        use_cache=True,
+                    )
+                    past_kv = out.past_key_values
+                    next_token = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                    all_tokens = torch.cat([all_tokens, next_token], dim=1)
 
-        response = tokenizer.decode(
-            all_tokens[0, question_ids.shape[1]:],
-            skip_special_tokens=True,
-        ).strip()
+                    if next_token.item() == tokenizer.eos_token_id:
+                        break
+
+            response = tokenizer.decode(
+                all_tokens[0, question_ids.shape[1]:],
+                skip_special_tokens=True,
+            ).strip()
 
     # Apply task-specific preprocessing (official LongBench standard)
     processed_response = preprocess_prediction(response, task_name)

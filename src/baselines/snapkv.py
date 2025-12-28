@@ -1,30 +1,9 @@
 """
-SnapKV: LLM Knows What You Are Looking For Before Generation
-=============================================================
-
-Reference: Li et al. "SnapKV: LLM Knows What You Are Looking For Before Generation"
-(NeurIPS 2024, arXiv:2404.14469)
-
-Paper insight: Each attention head consistently focuses on specific prompt attention
-features during generation. This robust pattern can be obtained from an "observation
-window" located at the end of the prompts.
-
-Algorithm:
-1. Use observation window (last ~32 tokens of prompt) to compute attention patterns
-2. Aggregate attention weights across queries in observation window (voting)
-3. Apply max/avg pooling to capture clustered important positions
-4. Select top-k positions based on pooled attention scores
-5. Retain those KV pairs + observation window tokens
-
-Key hyperparameters:
-- observation_window: Size of window at end of prompt (default: 32)
-- kernel_size: Pooling kernel size for clustering (default: 7)
-
-Faithful implementation based on:
-- Official repo: https://github.com/FasterDecoding/SnapKV
-- NVIDIA kvpress: https://github.com/NVIDIA/kvpress
+SnapKV: LLM Knows What You Are Looking For Before Generation (Li et al., NeurIPS 2024)
+Aligned with KVCache-Factory for LongBench comparison.
 """
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,254 +16,93 @@ from .base import CompressionConfig, CompressionMethod
 
 @dataclass
 class SnapKVConfig(CompressionConfig):
-    """SnapKV-specific configuration."""
-
-    # Size of observation window at end of prompt
-    observation_window: int = 32
-
-    # Kernel size for pooling (captures neighboring tokens)
-    kernel_size: int = 7
-
-    # Pooling type: "max" or "avg"
-    pooling: str = "avg"
+    max_capacity_prompt: int = 512  # Total KV cache size
+    window_size: int = 8  # Observation window for attention
+    kernel_size: int = 7  # Pooling kernel size
+    pooling: str = "maxpool"  # 'maxpool' or 'avgpool'
 
 
 class SnapKV(CompressionMethod):
-    """
-    SnapKV: Observation Window-based KV Cache Compression.
-
-    Strategy:
-    1. Extract observation window from end of prompt
-    2. Compute attention weights from queries in observation window to all keys
-    3. Aggregate (vote) across queries to get importance per key position
-    4. Apply pooling to capture clusters of important tokens
-    5. Select top-k most important positions
-    6. Retain selected KV pairs + full observation window
-
-    Key insight: The attention pattern in the observation window predicts
-    what tokens will be important during subsequent generation.
-    """
+    """SnapKV: Observation window queries + maxpool + top-k selection."""
 
     def __init__(self, config: SnapKVConfig):
         super().__init__(config)
-        self.snap_config = config
+        self.snapkv_config = config
 
     @property
     def name(self) -> str:
         return "SnapKV"
 
-    def _compute_attention_scores(
-        self,
-        queries: Tensor,
-        keys: Tensor,
-    ) -> Tensor:
-        """
-        Compute attention scores from queries to keys.
-
-        Args:
-            queries: (batch, n_queries, d_head)
-            keys: (batch, n_keys, d_head)
-
-        Returns:
-            Attention weights (batch, n_keys) aggregated across queries
-        """
-        # Compute attention: Q @ K^T / sqrt(d)
-        d_head = queries.shape[-1]
-        attn_scores = torch.bmm(queries, keys.transpose(-1, -2)) / (d_head**0.5)
-
-        # Apply softmax per query
-        attn_weights = F.softmax(attn_scores, dim=-1)  # (batch, n_queries, n_keys)
-
-        # Aggregate across queries (voting) - mean attention received by each key
-        importance = attn_weights.mean(dim=1)  # (batch, n_keys)
-
-        return importance
-
-    def _apply_pooling(
-        self,
-        scores: Tensor,
-        kernel_size: int,
-    ) -> Tensor:
-        """
-        Apply pooling to capture clustered important positions.
-
-        This ensures that if a position is important, its neighbors are
-        also retained to preserve contextual integrity.
-
-        Args:
-            scores: (batch, seq_len) importance scores
-            kernel_size: Size of pooling kernel
-
-        Returns:
-            Pooled scores (batch, seq_len)
-        """
-        # Add channel dimension for pooling: (batch, 1, seq_len)
-        scores_3d = scores.unsqueeze(1)
-
-        # Apply pooling with padding to preserve length
-        padding = kernel_size // 2
-
-        if self.snap_config.pooling == "max":
-            pooled = F.max_pool1d(
-                scores_3d, kernel_size=kernel_size, stride=1, padding=padding
-            )
-        else:  # avg
-            pooled = F.avg_pool1d(
-                scores_3d, kernel_size=kernel_size, stride=1, padding=padding
-            )
-
-        # Handle edge case where output size differs
-        if pooled.shape[-1] != scores.shape[-1]:
-            pooled = pooled[:, :, : scores.shape[-1]]
-
-        return pooled.squeeze(1)  # (batch, seq_len)
-
     def compress(
         self,
         keys: Tensor,
         values: Tensor,
+        query_states: Tensor | None = None,
         attention_scores: Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[Tensor, Tensor]:
-        """
-        Compress KV cache using SnapKV algorithm.
+        config = self.snapkv_config
 
-        Args:
-            keys: Key tensor (batch, seq_len, d_head) or (batch, n_heads, seq_len, d_head)
-            values: Value tensor with same shape as keys
-            attention_scores: Optional precomputed attention (not typically used)
-
-        Returns:
-            Tuple of (compressed_keys, compressed_values)
-        """
-        is_4d = keys.dim() == 4
-        if is_4d:
-            batch_size, n_heads, seq_len, d_head = keys.shape
-            # Process per head by flattening batch and heads
-            keys = keys.transpose(1, 2).reshape(batch_size, seq_len, n_heads * d_head)
-            values = values.transpose(1, 2).reshape(batch_size, seq_len, n_heads * d_head)
+        if keys.dim() == 3:
+            keys = keys.unsqueeze(1)
+            values = values.unsqueeze(1)
+            was_3d = True
         else:
-            batch_size, seq_len, d_head = keys.shape
+            was_3d = False
 
-        num_sink = self.config.num_sink
-        num_recent = self.config.num_recent
-        obs_window = self.snap_config.observation_window
-        budget = self.get_budget(seq_len)
+        bsz, num_heads, seq_len, head_dim = keys.shape
+        window_size = config.window_size
 
-        # If sequence fits within budget, no compression needed
-        if seq_len <= budget:
-            if is_4d:
-                keys = keys.view(batch_size, seq_len, n_heads, -1).transpose(1, 2)
-                values = values.view(batch_size, seq_len, n_heads, -1).transpose(1, 2)
+        if seq_len <= config.max_capacity_prompt:
+            if was_3d:
+                return keys.squeeze(1), values.squeeze(1)
             return keys, values
 
-        # Ensure observation window doesn't exceed sequence length
-        obs_window = min(obs_window, seq_len - num_sink)
+        if query_states is not None:
+            if query_states.dim() == 3:
+                query_states = query_states.unsqueeze(1)
 
-        # Extract observation window (queries) and prefix (keys to score)
-        # Observation window: last obs_window tokens before recent tokens
-        obs_start = seq_len - num_recent - obs_window if num_recent > 0 else seq_len - obs_window
-        obs_end = seq_len - num_recent if num_recent > 0 else seq_len
+            # Attention from OBSERVATION WINDOW queries only
+            attn_weights = torch.matmul(
+                query_states[..., -window_size:, :], keys.transpose(2, 3)
+            ) / math.sqrt(head_dim)
 
-        # Clamp to valid range
-        obs_start = max(num_sink, obs_start)
-        obs_end = max(obs_start + 1, obs_end)
+            # Causal mask for observation window
+            mask = torch.full((window_size, window_size), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
+            mask_cond = torch.arange(window_size, device=attn_weights.device)
+            mask.masked_fill_(mask_cond < (mask_cond + 1).view(window_size, 1), 0)
+            attn_weights[:, :, :, -window_size:] += mask[None, None, :, :]
 
-        # Use keys in observation window as proxy for queries
-        # (In full implementation, we'd use actual query vectors)
-        obs_keys = keys[:, obs_start:obs_end, :]  # (batch, obs_window, d)
+            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(keys.dtype)
 
-        # Compute attention from observation window to all prefix keys
-        prefix_end = obs_start  # Keys before observation window
-        prefix_keys = keys[:, :prefix_end, :]  # (batch, prefix_len, d)
+            # Sum attention to past tokens (exclude recent window)
+            attn_weights_sum = attn_weights[:, :, :, :-window_size].sum(dim=-2)
 
-        if prefix_keys.shape[1] == 0:
-            # No prefix to compress, just return sink + recent
-            if is_4d:
-                keys = keys.view(batch_size, seq_len, n_heads, -1).transpose(1, 2)
-                values = values.view(batch_size, seq_len, n_heads, -1).transpose(1, 2)
-            return keys, values
+            # Apply pooling
+            if config.pooling == "avgpool":
+                attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size=config.kernel_size, padding=config.kernel_size // 2, stride=1)
+            else:
+                attn_cache = F.max_pool1d(attn_weights_sum, kernel_size=config.kernel_size, padding=config.kernel_size // 2, stride=1)
 
-        # Compute importance scores for prefix positions
-        importance = self._compute_attention_scores(obs_keys, prefix_keys)
-
-        # Apply pooling to capture clusters
-        pooled_importance = self._apply_pooling(importance, self.snap_config.kernel_size)
-
-        # Protect sink tokens
-        pooled_importance[:, :num_sink] = float("inf")
-
-        # Calculate how many prefix tokens to keep
-        # Budget = num_sink + selected_middle + obs_window + num_recent
-        middle_budget = budget - num_sink - obs_window - num_recent
-        middle_budget = max(0, middle_budget)
-
-        # Number of middle tokens available (between sink and observation window)
-        middle_available = prefix_end - num_sink
-
-        if middle_available <= middle_budget or middle_budget <= 0:
-            # Keep all prefix tokens
-            selected_prefix = prefix_keys
-            selected_values_prefix = values[:, :prefix_end, :]
+        elif attention_scores is not None:
+            if attention_scores.dim() == 4:
+                attn_cache = attention_scores.mean(dim=1).sum(dim=1)
+            else:
+                attn_cache = attention_scores
         else:
-            # Select top-k from middle based on importance
-            middle_importance = pooled_importance[:, num_sink:prefix_end]
+            attn_cache = keys[:, :, :-window_size, :].norm(dim=-1)
 
-            _, top_indices = middle_importance.topk(middle_budget, dim=-1)
-            top_indices, _ = top_indices.sort(dim=-1)  # Preserve causal order
+        # Select top-k
+        num_to_keep = config.max_capacity_prompt - window_size
+        indices = attn_cache.topk(num_to_keep, dim=-1).indices
+        indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
 
-            # Add sink indices
-            sink_indices = torch.arange(num_sink, device=keys.device).unsqueeze(0).expand(batch_size, -1)
+        k_past = keys[:, :, :-window_size, :].gather(dim=2, index=indices)
+        v_past = values[:, :, :-window_size, :].gather(dim=2, index=indices)
 
-            # Shift middle indices to account for sink offset
-            middle_indices = top_indices + num_sink
+        keys_out = torch.cat([k_past, keys[:, :, -window_size:, :]], dim=2)
+        values_out = torch.cat([v_past, values[:, :, -window_size:, :]], dim=2)
 
-            all_indices = torch.cat([sink_indices, middle_indices], dim=-1)
-
-            # Gather selected prefix tokens
-            selected_prefix = torch.gather(
-                prefix_keys,
-                dim=1,
-                index=all_indices.unsqueeze(-1).expand(-1, -1, prefix_keys.shape[-1]),
-            )
-            selected_values_prefix = torch.gather(
-                values[:, :prefix_end, :],
-                dim=1,
-                index=all_indices.unsqueeze(-1).expand(-1, -1, values.shape[-1]),
-            )
-
-        # Concatenate: selected_prefix + observation_window + recent
-        obs_values = values[:, obs_start:obs_end, :]
-        recent_keys = keys[:, -num_recent:, :] if num_recent > 0 else keys[:, seq_len:, :]
-        recent_values = values[:, -num_recent:, :] if num_recent > 0 else values[:, seq_len:, :]
-
-        keys_out = torch.cat([selected_prefix, obs_keys, recent_keys], dim=1)
-        values_out = torch.cat([selected_values_prefix, obs_values, recent_values], dim=1)
-
-        if is_4d:
-            out_len = keys_out.shape[1]
-            keys_out = keys_out.view(batch_size, out_len, n_heads, -1).transpose(1, 2)
-            values_out = values_out.view(batch_size, out_len, n_heads, -1).transpose(1, 2)
-
+        if was_3d:
+            return keys_out.squeeze(1), values_out.squeeze(1)
         return keys_out, values_out
-
-
-def snapkv_compress(
-    keys: Tensor,
-    values: Tensor,
-    budget: int,
-    observation_window: int = 32,
-    kernel_size: int = 7,
-    num_sink: int = 4,
-    num_recent: int = 8,
-) -> tuple[Tensor, Tensor]:
-    """Standalone SnapKV function for testing."""
-    config = SnapKVConfig(
-        num_sink=num_sink,
-        num_recent=num_recent,
-        budget=budget,
-        observation_window=observation_window,
-        kernel_size=kernel_size,
-    )
-    method = SnapKV(config)
-    return method.compress(keys, values)
