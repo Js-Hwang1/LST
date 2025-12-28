@@ -214,9 +214,8 @@ DATASET_PROMPTS = {
         "Now, write a one-page summary of all the news.\n\nSummary:"
     ),
     "trec": (
-        "Please determine the type of the question below. Here are some examples "
-        "of questions.\n\n{context}\n\n"
-        "{input}"
+        "Please determine the type of the question below. Here are some examples of questions.\n\n"
+        "{context}\n{input}"
     ),
     "triviaqa": (
         "Answer the question based on the given passage. Only give me the answer "
@@ -303,36 +302,59 @@ def get_model_max_length(model_name: str) -> int:
     return MODEL_MAX_LENGTHS["default"]
 
 
-def apply_chat_template(tokenizer, prompt: str, model_name: str) -> str:
+def build_chat(tokenizer, prompt: str, model_name: str) -> str:
     """
-    Apply chat template for instruction-tuned models.
+    Build chat prompt following KVCache-Factory's approach.
 
-    Instruction models like Mistral-Instruct, Llama-Instruct need proper
-    formatting to work correctly.
+    For instruction-tuned models, wraps in appropriate chat format.
     """
     model_name_lower = model_name.lower()
 
-    # Check if model has a chat template
+    # Try using the tokenizer's chat template first
     if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template is not None:
         try:
             messages = [{"role": "user", "content": prompt}]
-            formatted = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
+            return tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
             )
-            return formatted
-        except Exception as e:
-            logger.debug(f"Chat template failed: {e}, using raw prompt")
+        except Exception:
+            pass
 
-    # Fallback for specific model types without chat template
-    if "instruct" in model_name_lower or "chat" in model_name_lower:
-        if "mistral" in model_name_lower or "mixtral" in model_name_lower:
-            return f"[INST] {prompt} [/INST]"
-        elif "llama" in model_name_lower:
-            return f"[INST] {prompt} [/INST]"
+    # Fallback: manual chat formatting for known models
+    if "llama2" in model_name_lower or "llama-2" in model_name_lower:
+        return f"[INST] {prompt} [/INST]"
+    elif "mistral" in model_name_lower or "mixtral" in model_name_lower:
+        return f"[INST] {prompt} [/INST]"
 
     return prompt
+
+
+def truncate_to_max_length(
+    tokenizer,
+    prompt: str,
+    max_length: int,
+) -> str:
+    """
+    Truncate prompt to max_length using KVCache-Factory's exact approach.
+
+    If the tokenized prompt exceeds max_length, takes the first half and
+    last half of tokens, decodes them, and concatenates.
+
+    This preserves the beginning (instructions) and end (question) of the prompt.
+
+    Reference: https://github.com/Zefan-Cai/KVCache-Factory/blob/main/run_longbench.py
+    """
+    input_ids = tokenizer.encode(prompt, add_special_tokens=True)
+
+    if len(input_ids) <= max_length:
+        return prompt
+
+    # KVCache-Factory's exact truncation: first half + last half
+    half = max_length // 2
+    first_half = tokenizer.decode(input_ids[:half], skip_special_tokens=True)
+    last_half = tokenizer.decode(input_ids[-half:], skip_special_tokens=True)
+
+    return first_half + last_half
 
 
 def load_model(model_name: str, device: torch.device):
@@ -1030,36 +1052,34 @@ def evaluate_sample(
     device = next(model.parameters()).device
     max_new_tokens = task_config.get("max_gen", 64)
 
-    # Build prompt using official LongBench template
+    # Build prompt using KVCache-Factory's exact approach
     context = sample["context"]
     question = sample["input"]
 
-    # Get official prompt template for this task
+    # Get prompt template for this task
     prompt_template = DATASET_PROMPTS.get(task_name)
-    if prompt_template:
-        # Use official prompt format
-        full_prompt = prompt_template.format(context=context, input=question)
-    else:
-        # Fallback to simple format
-        full_prompt = f"{context}\n\nQuestion: {question}\nAnswer:"
+    if not prompt_template:
+        prompt_template = "{context}\n\nQuestion: {input}\nAnswer:"
 
-    # Apply chat template for instruction-tuned models
-    full_prompt = apply_chat_template(tokenizer, full_prompt, model_name)
+    # Step 1: Build prompt from template
+    prompt = prompt_template.format(context=context, input=question)
 
-    # Tokenize the full prompt
-    input_ids = tokenizer(
-        full_prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=max_context_length,
-        add_special_tokens=True,
-    ).input_ids.to(device)
+    # Step 2: Apply chat template for instruction models
+    prompt = build_chat(tokenizer, prompt, model_name)
+
+    # Step 3: Truncate if needed (KVCache-Factory's first-half + last-half approach)
+    prompt = truncate_to_max_length(tokenizer, prompt, max_context_length)
+
+    # Step 4: Tokenize
+    tokenized = tokenizer(prompt, padding="longest", return_tensors="pt", add_special_tokens=True)
+    input_ids = tokenized.input_ids.to(device)
+    attention_mask = tokenized.attention_mask.to(device)
 
     prompt_len = input_ids.shape[1]
 
     if debug:
         logger.info(f"Prompt length: {prompt_len} tokens")
-        logger.info(f"Prompt (last 200 chars): ...{full_prompt[-200:]}")
+        logger.info(f"Prompt (last 200 chars): ...{prompt[-200:]}")
 
     # For dense (no compression), use model.generate() directly
     # This matches KVCache-Factory's approach and is more reliable
@@ -1067,6 +1087,7 @@ def evaluate_sample(
         with torch.no_grad():
             output_ids = model.generate(
                 input_ids,
+                attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens,
                 num_beams=1,
                 do_sample=False,
