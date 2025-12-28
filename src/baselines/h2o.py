@@ -18,6 +18,7 @@ from .base import CompressionConfig, CompressionMethod
 class H2OConfig(CompressionConfig):
     max_capacity_prompt: int = 512  # Total KV cache size
     window_size: int = 8  # Recent tokens to preserve
+    chunk_size: int = 1024  # Query chunk size for memory-efficient attention
 
 
 class H2O(CompressionMethod):
@@ -67,21 +68,36 @@ class H2O(CompressionMethod):
                 keys_expanded = keys.repeat_interleave(num_kv_groups, dim=1)
             else:
                 keys_expanded = keys
+                num_kv_groups = 1
 
-            # Attention from ALL queries to ALL keys
-            attn_weights = torch.matmul(query_states, keys_expanded.transpose(2, 3)) / math.sqrt(head_dim)
+            # Chunked attention to avoid OOM on long sequences
+            # Accumulate attention sums across query chunks
+            past_len = seq_len - window_size
+            attn_sum = torch.zeros(bsz, num_q_heads, past_len, device=keys.device, dtype=keys.dtype)
+            chunk_size = config.chunk_size
+            scale = 1.0 / math.sqrt(head_dim)
 
-            # Full causal mask (KVCache-Factory applies to entire matrix)
-            mask = torch.full((seq_len, seq_len), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
-            mask_cond = torch.arange(seq_len, device=attn_weights.device)
-            mask.masked_fill_(mask_cond < (mask_cond + 1).view(seq_len, 1), 0)
-            attn_weights = attn_weights + mask[None, None, :, :]
+            for q_start in range(0, seq_len, chunk_size):
+                q_end = min(q_start + chunk_size, seq_len)
+                q_chunk = query_states[:, :, q_start:q_end, :]
+                chunk_len = q_end - q_start
 
-            attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(keys.dtype)
+                # Attention: (bsz, num_q_heads, chunk, seq_len)
+                attn_chunk = torch.matmul(q_chunk, keys_expanded.transpose(2, 3)) * scale
 
-            # Sum across ALL queries, exclude recent window from selection
-            # For GQA, average across query head groups to get per-KV-head scores
-            attn_sum = attn_weights[:, :, :, :-window_size].sum(dim=-2)
+                # Causal mask: query at position q_start+i can only attend to keys 0..q_start+i
+                # Vectorized: row[i] masks out positions > q_start + i
+                row_idx = torch.arange(chunk_len, device=keys.device).unsqueeze(1)
+                col_idx = torch.arange(seq_len, device=keys.device).unsqueeze(0)
+                causal_mask = col_idx > (q_start + row_idx)
+                attn_chunk = attn_chunk.masked_fill(causal_mask[None, None, :, :], torch.finfo(attn_chunk.dtype).min)
+
+                attn_chunk = F.softmax(attn_chunk, dim=-1, dtype=torch.float32).to(keys.dtype)
+
+                # Sum attention to past tokens (exclude recent window)
+                attn_sum += attn_chunk[:, :, :, :past_len].sum(dim=2)
+
+            # For GQA, average across query head groups
             if num_q_heads != num_heads:
                 attn_cache = attn_sum.view(bsz, num_heads, num_kv_groups, -1).mean(dim=2)
             else:
