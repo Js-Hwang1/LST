@@ -119,10 +119,25 @@ TASK_CONFIGS = {
     "repobench-p": {"type": "code", "metric": "code_sim", "max_gen": 64},
 }
 
-# TREC classification labels (official LongBench)
+# TREC classification labels (fine-grained, from official LongBench data)
+# These are the actual labels used in the few-shot examples
 TREC_CLASSES = [
-    "ABBR", "ENTY", "DESC", "HUM", "LOC", "NUM",
-    "ABBREVIATION", "ENTITY", "DESCRIPTION", "HUMAN", "LOCATION", "NUMERIC",
+    # Fine-grained classes from LongBench TREC data
+    "Abbreviation", "Expression abbreviated",
+    "Animal", "Body of water", "Color", "Currency name", "Disease and medicine",
+    "Element and substance", "Event", "Food", "Instrument", "Language",
+    "Letter like a-z", "Musical instrument", "Other entity", "Plant", "Product",
+    "Religion", "Sport", "Symbols and sign", "Techniques and method", "Vehicle",
+    "Word with a special property",
+    "Definition of something", "Description of a person", "Description of something",
+    "Equivalent term", "Manner of an action", "Reason",
+    "Group or organization of person", "Individual", "Title of a person",
+    "City", "Country", "Mountain", "Other location", "State",
+    "Date", "Distance, linear measure", "Lasting time of somethin", "Money",
+    "Number of something", "Order, rank", "Other number", "Percent, fraction",
+    "Postcode or other code", "Price", "Size, area and volume", "Speed",
+    "Temperature", "Weight", "Invention, book and other creative piece",
+    "Organ of body",
 ]
 
 # Official LongBench prompt templates (from THUDM/LongBench)
@@ -201,8 +216,7 @@ DATASET_PROMPTS = {
     "trec": (
         "Please determine the type of the question below. Here are some examples "
         "of questions.\n\n{context}\n\n"
-        "{input}\n"
-        "Type:"
+        "{input}"
     ),
     "triviaqa": (
         "Answer the question based on the given passage. Only give me the answer "
